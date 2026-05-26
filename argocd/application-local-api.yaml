@@ -10,7 +10,7 @@ spec:
   source:
     repoURL: https://github.com/mruizm4/MLOPS-Proyectos-entrega-2.git
     targetRevision: argo-cd
-    path: MLOPS-Proyectos-entrega-2/k8s
+    path: k8s
 
   destination:
     server: https://kubernetes.default.svc

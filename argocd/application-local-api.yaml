@@ -8,8 +8,8 @@ spec:
   project: default
 
   source:
-    repoURL: https://github.com/mruizm4/MLOPS-Proyectos-entrega-2.git
-    targetRevision: argo-cd
+    repoURL: https://github.com/ccarvajalesc/mlops-proyecto-final.git
+    targetRevision: main
     path: k8s
 
   destination:

@@ -29,7 +29,7 @@ spec:
 
     spec:
       containers:
-        - image: karabaharesu/mlops-final-get-data-api:4
+        - image: cristiandiaz13/mlops-puj:data-api-pf-v1
           imagePullPolicy: Always
           name: get-data-api
 

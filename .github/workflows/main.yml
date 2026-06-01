@@ -36,10 +36,6 @@ jobs:
             dockerfile: ./Dockerfile
             context: .
 
-          # Servicio 2: API de Datos
-          - image_name: karabaharesu/mlops-final-get-data-api
-            dockerfile: ./api_datos/Dockerfile.api_datos
-            context: ./api_datos
 
           # Servicio 3: API de Inferencia
           - image_name: karabaharesu/mlops-final-api-inference
@@ -146,9 +142,6 @@ jobs:
           sed -i "s|karabaharesu/mlops-final-api-inference:.*|karabaharesu/mlops-final-api-inference:${VERSION}|g" \
           k8s/api_inference/api-inference-deployment.yaml
 
-          # Get Data API
-          sed -i "s|karabaharesu/mlops-final-get-data-api:.*|karabaharesu/mlops-final-get-data-api:${VERSION}|g" \
-          k8s/get_data_api/get-data-api-deployment.yaml
 
           # Streamlit UI
           sed -i "s|karabaharesu/mlops-final-streamlit-ui:.*|karabaharesu/mlops-final-streamlit-ui:${VERSION}|g" \

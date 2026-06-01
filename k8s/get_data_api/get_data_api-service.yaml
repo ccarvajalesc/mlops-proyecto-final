@@ -11,6 +11,6 @@ spec:
   ports:
     - name: "8003"
       port: 8003
-      targetPort: 8003
+      targetPort: 80
   selector:
     io.kompose.service: get-data-api

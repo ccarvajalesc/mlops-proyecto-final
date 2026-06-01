@@ -35,15 +35,15 @@ spec:
 
           resources:
             requests:
-              memory: "128Mi"
-              cpu: "100m"
+              memory: "512Mi"
+              cpu: "250m"
 
             limits:
-              memory: "512Mi"
-              cpu: "500m"
+              memory: "2Gi"
+              cpu: "1000m"
 
           ports:
-            - containerPort: 8003
+            - containerPort: 80
               protocol: TCP
 
       restartPolicy: Always

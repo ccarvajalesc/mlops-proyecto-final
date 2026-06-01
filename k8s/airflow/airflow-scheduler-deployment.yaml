@@ -20,7 +20,7 @@ spec:
       containers:
         - name: airflow-scheduler
 
-          image: karabaharesu/mlops-final-airflow:3
+          image: karabaharesu/mlops-final-airflow:4
           imagePullPolicy: Always
 
           resources:

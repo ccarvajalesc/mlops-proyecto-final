@@ -5,7 +5,8 @@ metadata:
   name: airflow-init
 
   annotations:
-    argocd.argoproj.io/sync-options: Replace=true
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 
 spec:
   template:

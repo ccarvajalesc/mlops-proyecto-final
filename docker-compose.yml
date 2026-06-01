@@ -346,17 +346,11 @@ services:
 
 
   get_data_api:
-    build:
-      context: ./api_datos
-      dockerfile: Dockerfile.api_datos
+    image: cristiandiaz13/mlops-puj:data-api-pf-v1
     container_name: fastapi
     ports:
-      - '8003:8003'
-    volumes:
-      - ./api_datos/data:/data
-    restart: always
-    networks:
-      - mlops_net
+      - "8003:80"
+    restart: unless-stopped
 
   minio:
     image: quay.io/minio/minio:latest

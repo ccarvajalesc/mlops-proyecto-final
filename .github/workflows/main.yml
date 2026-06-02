@@ -109,7 +109,6 @@ jobs:
             echo "✅ Todas las imágenes se construyeron y publicaron exitosamente en DockerHub"
             echo "📦 Imágenes disponibles en:"
             echo "   - karabaharesu/mlops-final-airflow:${{ github.run_number }}"
-            echo "   - karabaharesu/mlops-final-get-data-api:${{ github.run_number }}"
             echo "   - karabaharesu/mlops-final-api-inference:${{ github.run_number }}"
             echo "   - karabaharesu/mlops-final-streamlit-ui:${{ github.run_number }}"
             echo "   - karabaharesu/mlops-final-locust:${{ github.run_number }}"

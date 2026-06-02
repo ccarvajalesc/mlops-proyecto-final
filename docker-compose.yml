@@ -350,6 +350,8 @@ services:
     container_name: fastapi
     ports:
       - "8003:80"
+    networks:
+      - mlops_net
     restart: unless-stopped
 
   minio:
@@ -370,44 +372,44 @@ services:
     restart: unless-stopped
 
 
-  api-inference:
-    build:
-      context: ./inference_api
-      dockerfile: Dockerfile.inference_api
-
-    container_name: api-inference
-    ports:
-      - "8001:8001"
-
-    depends_on:
-      
-
-      mysql_db:
-        condition: service_healthy
-
-      mlflow:
-        condition: service_healthy
-
-      minio:
-        condition: service_started
-
-      airflow-init:
-        condition: service_started
-      
-      
-
-    env_file:
-      - .env
-      - .sec_config
-
-    volumes:
-      - ./inference_api:/app
-      - ./encoders:/app/encoders
-      - ./logs:/app/logs
-
-    networks:
-      - minio-net
-      - mlops_net
+#  api-inference:
+#    build:
+#      context: ./inference_api
+#      dockerfile: Dockerfile.inference_api
+#
+#    container_name: api-inference
+#    ports:
+#      - "8001:8001"
+#
+#    depends_on:
+#      
+#
+#      mysql_db:
+#        condition: service_healthy
+#
+#      mlflow:
+#        condition: service_healthy
+#
+#      minio:
+#        condition: service_started
+#
+#      airflow-init:
+#        condition: service_started
+#      
+#      
+#
+#    env_file:
+#      - .env
+#      - .sec_config
+#
+#    volumes:
+#      - ./inference_api:/app
+#      - ./encoders:/app/encoders
+#      - ./logs:/app/logs
+#
+#    networks:
+#      - minio-net
+#      - mlops_net
 
   mlflow:
 
@@ -455,89 +457,89 @@ services:
     restart: always
 
 
-  locust:
-    build:
-      context: ./locust/
-      dockerfile: Dockerfile.locust
-    container_name: locust
-    ports:
-      - "8089:8089"
-    env_file:
-      - .env
-      - .sec_config
-    networks:
-      - mlops_net
+#  locust:
+#    build:
+#      context: ./locust/
+#      dockerfile: Dockerfile.locust
+#    container_name: locust
+#    ports:
+#      - "8089:8089"
+#    env_file:
+#      - .env
+#      - .sec_config
+#    networks:
+#      - mlops_net
 
-  streamlit-ui:
-    build:
-      context: ./streamlit_ui
-      dockerfile: Dockerfile.streamlit_ui
+#  streamlit-ui:
+#    build:
+#      context: ./streamlit_ui
+#      dockerfile: Dockerfile.streamlit_ui
+#
+#    container_name: diabetes-streamlit-ui
+#
+#    ports:
+#      - "8501:8501"
+#
+#    env_file:
+#      - .env
+#      - .sec_config
+#
+#    depends_on:
+#      - api-inference
+#
+#    networks:
+#      - mlops_net
+#
+#  node-exporter:
+#    image: prom/node-exporter
+#    container_name: node-exporter
+#
+#    ports:
+#      - "9100:9100"
+#
+#    networks:
+#      - mlops_net
+#
+#    restart: unless-stopped
 
-    container_name: diabetes-streamlit-ui
+#  prometheus:
+#    image: prom/prometheus
+#    container_name: prometheus
+#
+#    ports:
+#      - "9090:9090"
+#
+#    volumes:
+#      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+#
+#    networks:
+#      - mlops_net
+#
+#    restart: unless-stopped
 
-    ports:
-      - "8501:8501"
-
-    env_file:
-      - .env
-      - .sec_config
-
-    depends_on:
-      - api-inference
-
-    networks:
-      - mlops_net
-
-  node-exporter:
-    image: prom/node-exporter
-    container_name: node-exporter
-
-    ports:
-      - "9100:9100"
-
-    networks:
-      - mlops_net
-
-    restart: unless-stopped
-
-  prometheus:
-    image: prom/prometheus
-    container_name: prometheus
-
-    ports:
-      - "9090:9090"
-
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-
-    networks:
-      - mlops_net
-
-    restart: unless-stopped
-
-  grafana:
-    image: grafana/grafana
-    container_name: grafana
-
-    ports:
-      - "3000:3000"
-
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning
-      - ./grafana/dashboards:/var/lib/grafana/dashboards
-
-    env_file:
-      - .env
-      - .sec_config
-    
-    depends_on:
-      - prometheus
-
-    networks:
-      - mlops_net
-
-    restart: unless-stopped
+#  grafana:
+#    image: grafana/grafana
+#    container_name: grafana
+#
+#    ports:
+#      - "3000:3000"
+#
+#    volumes:
+#      - grafana_data:/var/lib/grafana
+#      - ./grafana/provisioning:/etc/grafana/provisioning
+#      - ./grafana/dashboards:/var/lib/grafana/dashboards
+#
+#    env_file:
+#      - .env
+#      - .sec_config
+#    
+#    depends_on:
+#      - prometheus
+#
+#    networks:
+#      - mlops_net
+#
+#    restart: unless-stopped
 
 volumes:
   postgres-db-volume:

@@ -25,7 +25,7 @@ spec:
       containers:
         - name: airflow-triggerer
 
-          image: karabaharesu/mlops-final-airflow:4
+          image: karabaharesu/mlops-final-airflow:8
           imagePullPolicy: Always
 
           resources:

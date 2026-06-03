@@ -21,7 +21,7 @@ spec:
         io.kompose.service: streamlit-ui
     spec:
       containers:
-        - image: karabaharesu/mlops-final-streamlit-ui:13
+        - image: karabaharesu/mlops-final-streamlit-ui:14
           name: streamlit-ui
           resources:
             requests:

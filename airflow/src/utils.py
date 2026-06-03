@@ -106,12 +106,12 @@ TEST_SIZE = 0.15
 # CONFIG
 # =========================
 
-API_BASE_URL = "http://localhost:8003"
+API_BASE_URL = "http://get-data-api:8003"
 GROUP_NUMBER = 3
 
 MYSQL_USER = "mlops_user"
 MYSQL_PASSWORD = "mlops_pass"
-MYSQL_HOST = "localhost"
+MYSQL_HOST = "mysql-db"
 MYSQL_PORT = "3306"
 MYSQL_DATABASE = "mlops_db"
 

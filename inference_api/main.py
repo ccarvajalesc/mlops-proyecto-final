@@ -5,17 +5,20 @@
 import os
 import json
 import time
+import random
 import tempfile
-
 from datetime import datetime
 
 import pandas as pd
 import mlflow
 import mlflow.catboost
 
-from prometheus_fastapi_instrumentator import (
-    Instrumentator
-)
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import Response
+
+from sqlalchemy import create_engine, text
+
+from mlflow.tracking import MlflowClient
 
 from prometheus_client import (
     Counter,
@@ -25,56 +28,48 @@ from prometheus_client import (
     CONTENT_TYPE_LATEST
 )
 
+from prometheus_fastapi_instrumentator import Instrumentator
 
-from mlflow.tracking import MlflowClient
-
-from sqlalchemy import (
-    create_engine,
-    text
-)
-
-from fastapi import (
-    FastAPI,
-    HTTPException
-)
-import random
-
-from fastapi.responses import Response
-
-from fastapi.responses import JSONResponse
 
 # ============================================================
 # ⚙️ CONFIG
 # ============================================================
 
-# ----------------------------------------
-# MYSQL
-# ----------------------------------------
+MYSQL_HOST = os.getenv("MYSQL_HOST", "localhost")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_DB = os.getenv("MYSQL_DATABASE", "mlflow_db")
+MYSQL_USER = os.getenv("MYSQL_USER", "mlops_user")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "mlops_pass")
 
-MYSQL_HOST = os.environ.get("MYSQL_HOST", "mysql_db")
-MYSQL_PORT = os.environ.get("MYSQL_PORT", 3306)
-MYSQL_DB = os.environ.get("MYSQL_DATABASE")
-MYSQL_USER = os.environ.get("MYSQL_USER")
-MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD")
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
 
-# ----------------------------------------
-# MLFLOW
-# ----------------------------------------
+MODEL_NAME = os.getenv("MODEL_NAME", "real_estate_price_model")
+MODEL_ALIAS = os.getenv("MODEL_ALIAS", "champion")
 
-MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+MODEL_REFRESH_INTERVAL = 1  # segundos
 
-MODEL_NAME = os.environ.get("MODEL_NAME", "diabetes_model")
+print(
+    "MLFLOW_TRACKING_URI=",
+    MLFLOW_TRACKING_URI
+)
 
-MODEL_ALIAS = os.environ.get("MODEL_ALIAS", "champion")
-
-# ----------------------------------------
-# MODEL REFRESH
-# ----------------------------------------
-
-MODEL_REFRESH_INTERVAL = 1
 
 # ============================================================
-# 📊 PROMETHEUS METRICS
+# 🗄️ DB ENGINE
+# ============================================================
+
+def create_engine_db():
+
+    return create_engine(
+        f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}"
+        f"@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}"
+    )
+
+ENGINE = create_engine_db()
+
+
+# ============================================================
+# 📊 PROMETHEUS
 # ============================================================
 
 REQUEST_COUNT = Counter(
@@ -97,69 +92,500 @@ REQUEST_LATENCY = Histogram(
     "Prediction latency"
 )
 
+MODEL_VERSION_GAUGE = Gauge(
+    "model_version",
+    "Current model version",
+    ["model", "alias"]
+)
+
+
 MODEL_LOADED = Gauge(
     "model_loaded",
     "Whether a model is loaded"
 )
 
-MODEL_VERSION_GAUGE =Gauge(
+MODEL_INFO = Gauge(
     "model_info",
     "Current loaded model",
     ["model_name", "model_version", "model_alias"]
-)
-
+)   
 
 # ============================================================
-# 🚀 FASTAPI
+# 🚀 APP
 # ============================================================
 
-app = FastAPI(
-    title="Diabetes Inference API",
-    version="1.0.0"
-)
+app = FastAPI(title="MLflow Inference API", version="1.0")
 
 Instrumentator().instrument(app).expose(app)
 
+
 # ============================================================
-# 🌎 GLOBALS
+# 🌎 GLOBAL STATE
 # ============================================================
 
 MODEL = None
-
+CB_MODEL = None
 FEATURE_METADATA = None
 
 MODEL_VERSION = None
+RUN_ID = None
 
-LAST_MODEL_CHECK = 0
+LAST_REFRESH = 0
 
-MODEL_LOADED_AT = None
+MODEL_FEATURES = []
+CAT_FEATURE_INDICES = []
+
+client = MlflowClient()
+
 
 # ============================================================
-# 🗄️ DATABASE
+# 🔁 LOAD MODEL
 # ============================================================
 
-def create_db_engine():
-    """
-    Creates SQLAlchemy engine.
-    """
+def load_model():
 
-    connection_uri = (
-        f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}"
-        f"@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}"
+    global MODEL
+    global CB_MODEL
+    global FEATURE_METADATA
+
+    global MODEL_VERSION
+    global RUN_ID
+
+    global MODEL_FEATURES
+    global CAT_FEATURE_INDICES
+
+    mlflow.set_tracking_uri(
+        MLFLOW_TRACKING_URI
     )
 
-    return create_engine(connection_uri)
+    champion = (
+        client.get_model_version_by_alias(
+            MODEL_NAME,
+            MODEL_ALIAS
+        )
+    )
 
-ENGINE = create_db_engine()
+    MODEL_VERSION = champion.version
+    RUN_ID = champion.run_id
+
+    model_uri = (
+        f"models:/{MODEL_NAME}@{MODEL_ALIAS}"
+    )
+
+    MODEL = mlflow.pyfunc.load_model(
+        model_uri
+    )
+
+    CB_MODEL = mlflow.catboost.load_model(
+        model_uri
+    )
+
+    MODEL_FEATURES = (
+        CB_MODEL.feature_names_
+    )
+
+    CAT_FEATURE_INDICES = (
+        CB_MODEL.get_cat_feature_indices()
+    )
+
+    metadata_path = (
+        client.download_artifacts(
+            RUN_ID,
+            "training_metadata.json"
+        )
+    )
+
+    with open(metadata_path, "r") as f:
+
+        FEATURE_METADATA = json.load(f)
+
+    MODEL_VERSION_GAUGE.labels(
+        model=MODEL_NAME,
+        alias=MODEL_ALIAS
+    ).set(float(MODEL_VERSION))
+
+    MODEL_LOADED.set(1)
+
+    MODEL_INFO.labels(
+        model_name=MODEL_NAME,
+        model_version=str(MODEL_VERSION),
+        model_alias=MODEL_ALIAS
+    ).set(1)
+
+    print(
+        f"Loaded model v{MODEL_VERSION}"
+    )
+
 
 # ============================================================
-# 🗄️ CREATE INFERENCE TABLE
+# 🔄 REFRESH MODEL (TTL)
 # ============================================================
 
+def refresh_model():
+
+    global LAST_REFRESH
+
+    now = time.time()
+
+    if (
+        MODEL is not None
+        and
+        now - LAST_REFRESH
+        < MODEL_REFRESH_INTERVAL
+    ):
+        return
+
+    try:
+
+        mlflow.set_tracking_uri(
+            MLFLOW_TRACKING_URI
+        )
+
+        champion = (
+            client.get_model_version_by_alias(
+                MODEL_NAME,
+                MODEL_ALIAS
+            )
+        )
+
+        if MODEL is None:
+
+            load_model()
+
+            LAST_REFRESH = now
+
+            return
+
+        if str(champion.version) != str(MODEL_VERSION):
+
+            print(
+                f"New model detected "
+                f"{MODEL_VERSION}"
+                f" -> "
+                f"{champion.version}"
+            )
+
+            load_model()
+
+        LAST_REFRESH = now
+
+    except Exception as e:
+
+        print(
+            f"Refresh failed: {e}"
+        )
+
+
+# ============================================================
+# ✅ VALIDATION
+# ============================================================
+
+def validate_payload(payload):
+
+    validated = {}
+
+    numeric_ranges = (
+        FEATURE_METADATA["numeric_ranges"]
+    )
+
+    allowed_categories = (
+        FEATURE_METADATA["allowed_categories"]
+    )
+
+    # ==================================================
+    # CATEGORICAL FEATURES
+    # ==================================================
+
+    for feature, categories in (
+        allowed_categories.items()
+    ):
+
+        if feature not in payload:
+
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing feature: {feature}"
+            )
+
+        value = str(
+            payload[feature]
+        )
+
+        if value not in categories:
+
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "feature": feature,
+                    "invalid_value": value,
+                    "allowed_values": categories[:20]
+                }
+            )
+
+        validated[feature] = value
+
+    # ==================================================
+    # NUMERIC FEATURES
+    # ==================================================
+
+    for feature, limits in (
+        numeric_ranges.items()
+    ):
+
+        if feature not in payload:
+
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing feature: {feature}"
+            )
+
+        try:
+
+            value = float(
+                payload[feature]
+            )
+
+        except Exception:
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid numeric value "
+                    f"for {feature}"
+                )
+            )
+
+        if value < limits["min"]:
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{feature} below minimum "
+                    f"({limits['min']})"
+                )
+            )
+
+        if value > limits["max"]:
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{feature} above maximum "
+                    f"({limits['max']})"
+                )
+            )
+
+        validated[feature] = value
+
+    return validated
+
+
+# ============================================================
+# 🧠 SAMPLE PAYLOAD
+# ============================================================
+@app.get("/sample")
+def sample():
+
+    refresh_model()
+
+    if FEATURE_METADATA is None:
+
+        raise HTTPException(
+            status_code=503,
+            detail="Metadata not loaded"
+        )
+
+    sample = {}
+
+    # categóricas
+
+    for feature, categories in (
+        FEATURE_METADATA["allowed_categories"]
+        .items()
+    ):
+
+        sample[feature] = random.choice(
+            categories
+        )
+
+    # numéricas
+
+    for feature, limits in (
+        FEATURE_METADATA["numeric_ranges"]
+        .items()
+    ):
+
+        sample[feature] = round(
+            random.uniform(
+                limits["min"],
+                limits["max"]
+            ),
+            4
+        )
+
+    return {
+        "model_version": MODEL_VERSION,
+        "payload": sample
+    }
+
+# ============================================================
+# 📊 FEATURE METADATA
+# ============================================================
+
+@app.get("/metadata")
+def metadata():
+
+    refresh_model()
+
+    if FEATURE_METADATA is None:
+
+        raise HTTPException(
+            status_code=503,
+            detail="Metadata not loaded"
+        )
+
+    return {
+        "model": MODEL_NAME,
+        "version": MODEL_VERSION,
+        "metadata": FEATURE_METADATA
+    }
+
+
+@app.on_event("startup")
+def startup():
+
+    print("Starting API...")
+
+    create_inference_table()
+
+    try:
+
+        load_model()
+
+    except Exception as e:
+
+        print(
+            f"Could not load model: {e}"
+        )
+
+    print("API ready")
+
+# ============================================================
+# 🔮 PREDICT
+# ============================================================
+
+@app.post("/predict")
+def predict(payload: dict):
+
+    start_time = time.time()
+
+    REQUEST_COUNT.inc()
+
+    try:
+
+        refresh_model()
+
+        if MODEL is None:
+
+            PREDICTION_ERRORS.inc()
+
+            raise HTTPException(
+                status_code=503,
+                detail="Model not loaded"
+            )
+
+        validated_payload = (
+            validate_payload(
+                payload
+            )
+        )
+
+        input_df = pd.DataFrame(
+            [validated_payload]
+        )
+
+        input_df = input_df[
+            MODEL_FEATURES
+        ]
+
+        for idx in CAT_FEATURE_INDICES:
+
+            col = MODEL_FEATURES[idx]
+
+            input_df[col] = (
+                input_df[col]
+                .astype(str)
+            )
+
+        prediction = float(
+            MODEL.predict(
+                input_df
+            )[0]
+        )
+
+        processing_time_ms = (
+            time.time()
+            - start_time
+        ) * 1000
+
+        REQUEST_LATENCY.observe(
+            processing_time_ms / 1000
+        )
+
+        PREDICTION_COUNT.inc()
+
+        response = {
+
+            "predicted_price": round(
+                prediction,
+                2
+            ),
+
+            "model_name":
+                MODEL_NAME,
+
+            "model_version":
+                MODEL_VERSION,
+
+            "model_alias":
+                MODEL_ALIAS,
+
+            "processing_time_ms":
+                round(
+                    processing_time_ms,
+                    2
+                )
+        }
+
+        log_inference(
+            request_json=payload,
+            response_json=response,
+            predicted_price=prediction,
+            processing_time_ms=processing_time_ms
+        )
+
+        return response
+
+    except HTTPException:
+
+        PREDICTION_ERRORS.inc()
+
+        raise
+
+    except Exception as e:
+
+        PREDICTION_ERRORS.inc()
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+
+# ============================================================
+# 🗄️ LOGS
+# ============================================================
 def create_inference_table():
-    """
-    Creates inference log table.
-    """
 
     query = """
     CREATE TABLE IF NOT EXISTS inference_logs (
@@ -176,9 +602,7 @@ def create_inference_table():
 
         processing_time_ms FLOAT,
 
-        prediction VARCHAR(255),
-
-        probability FLOAT,
+        predicted_price DOUBLE,
 
         request_json JSON,
 
@@ -190,626 +614,99 @@ def create_inference_table():
 
         conn.execute(text(query))
 
-    print("✅ inference_logs table ready")
-
-# ============================================================
-# 🤖 LOAD CHAMPION MODEL
-# ============================================================
-
-def load_champion_model():
-    """
-    Loads champion model and metadata from MLflow.
-    """
-
-    global MODEL
-    global FEATURE_METADATA
-    global MODEL_VERSION
-    global MODEL_LOADED_AT
-
-    print("⬇️ Loading champion model...")
-
-    mlflow.set_tracking_uri(
-        MLFLOW_TRACKING_URI
-    )
-
-    client = MlflowClient()
-
-    champion = client.get_model_version_by_alias(
-        MODEL_NAME,
-        MODEL_ALIAS
-    )
-
-    version = champion.version
-
-    run_id = champion.run_id
-
-    # --------------------------------------------------------
-    # LOAD MODEL
-    # --------------------------------------------------------
-
-    model_uri = (
-        f"models:/{MODEL_NAME}@{MODEL_ALIAS}"
-    )
-
-    MODEL = mlflow.catboost.load_model(
-        model_uri
-    )
-
-    # --------------------------------------------------------
-    # LOAD FEATURE METADATA
-    # --------------------------------------------------------
-
-    metadata_path = (
-        mlflow.artifacts.download_artifacts(
-            run_id=run_id,
-            artifact_path=(
-                "metadata/"
-                "feature_metadata.json"
-            )
-        )
-    )
-
-    with open(metadata_path, "r") as f:
-
-        FEATURE_METADATA = json.load(f)
-
-    MODEL_VERSION = version
-
-    MODEL_LOADED_AT = datetime.utcnow()
-
-
-    MODEL_LOADED.set(1)
-
-    try:
-        MODEL_VERSION_GAUGE.labels(
-            model_name=MODEL_NAME,
-            model_version=str(MODEL_VERSION),
-            model_alias=MODEL_ALIAS
-        ).set(1)
-    except:
-        pass
-
-    print(
-        f"✅ Champion model loaded "
-        f"(version={version})"
-    )
-
-# ============================================================
-# 🔄 REFRESH MODEL IF NEEDED
-# ============================================================
-def refresh_model_if_needed():
-    """
-    Reloads model if champion changed.
-    Also tries loading model if none exists.
-    """
-
-    global LAST_MODEL_CHECK
-    global MODEL
-
-    now = time.time()
-
-    # --------------------------------------------------------
-    # IF MODEL IS MISSING:
-    # ALWAYS TRY
-    # --------------------------------------------------------
-
-    if MODEL is not None:
-
-        if (
-            now - LAST_MODEL_CHECK
-            < MODEL_REFRESH_INTERVAL
-        ):
-
-            return
-
-    LAST_MODEL_CHECK = now
-
-    try:
-
-        mlflow.set_tracking_uri(
-            MLFLOW_TRACKING_URI
-        )
-
-        client = MlflowClient()
-
-        champion = (
-            client.get_model_version_by_alias(
-                MODEL_NAME,
-                MODEL_ALIAS
-            )
-        )
-
-        latest_version = champion.version
-
-        # ----------------------------------------------------
-        # NO MODEL LOADED
-        # ----------------------------------------------------
-
-        if MODEL is None:
-
-            print(
-                "⬇️ Loading first champion model..."
-            )
-
-            load_champion_model()
-
-            return
-
-        # ----------------------------------------------------
-        # RELOAD IF VERSION CHANGED
-        # ----------------------------------------------------
-
-        global MODEL_VERSION
-
-        if (
-            str(latest_version)
-            != str(MODEL_VERSION)
-        ):
-
-            print(
-                f"🔄 New champion detected "
-                f"({MODEL_VERSION} -> "
-                f"{latest_version})"
-            )
-
-            load_champion_model()
-
-    except Exception as e:
-
-        print(
-            "⚠️ Could not refresh model"
-        )
-
-        MODEL_LOADED.set(0)
-
-        print(str(e))
-
-# ============================================================
-# ✅ VALIDATE PAYLOAD
-# ============================================================
-
-def validate_payload(payload):
-    """
-    Validates payload using feature metadata.
-    """
-
-    validated = {}
-
-    # --------------------------------------------------------
-    # CHECK REQUIRED FEATURES
-    # --------------------------------------------------------
-
-    for feature_name, metadata in (
-        FEATURE_METADATA.items()
-    ):
-
-        if feature_name not in payload:
-
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Missing feature: "
-                    f"{feature_name}"
-                )
-            )
-
-        value = payload[feature_name]
-
-        # ----------------------------------------------------
-        # CATEGORICAL
-        # ----------------------------------------------------
-
-        if metadata["type"] == "categorical":
-
-            allowed_values = metadata["values"]
-
-            if value not in allowed_values:
-
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "feature": feature_name,
-                        "invalid_value": value,
-                        "allowed_values": allowed_values
-                    }
-                )
-
-            validated[feature_name] = str(value)
-
-        # ----------------------------------------------------
-        # NUMERIC
-        # ----------------------------------------------------
-
-        else:
-
-            try:
-
-                numeric_value = float(value)
-
-            except Exception:
-
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Invalid numeric value "
-                        f"for {feature_name}"
-                    )
-                )
-
-            min_value = metadata["min"]
-            max_value = metadata["max"]
-
-            if (
-                min_value is not None
-                and numeric_value < min_value
-            ):
-
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"{feature_name} below "
-                        f"minimum value"
-                    )
-                )
-
-            if (
-                max_value is not None
-                and numeric_value > max_value
-            ):
-
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"{feature_name} above "
-                        f"maximum value"
-                    )
-                )
-
-            validated[feature_name] = numeric_value
-
-    return validated
-
-# ============================================================
-# 🗄️ LOG INFERENCE
-# ============================================================
+    print("Inference table ready")
 
 def log_inference(
     request_json,
     response_json,
-    prediction,
-    probability,
+    predicted_price,
     processing_time_ms
 ):
     """
-    Stores inference into MySQL.
+    Stores inference request into MySQL.
     """
 
-    query = text("""
-    INSERT INTO inference_logs (
+    query = text(
+        """
+        INSERT INTO inference_logs (
 
-        timestamp,
-        model_name,
-        model_version,
-        model_alias,
-        processing_time_ms,
-        prediction,
-        probability,
-        request_json,
-        response_json
+            timestamp,
+            model_name,
+            model_version,
+            model_alias,
+            processing_time_ms,
+            predicted_price,
+            request_json,
+            response_json
 
-    ) VALUES (
+        ) VALUES (
 
-        :timestamp,
-        :model_name,
-        :model_version,
-        :model_alias,
-        :processing_time_ms,
-        :prediction,
-        :probability,
-        :request_json,
-        :response_json
+            :timestamp,
+            :model_name,
+            :model_version,
+            :model_alias,
+            :processing_time_ms,
+            :predicted_price,
+            :request_json,
+            :response_json
+        )
+        """
     )
-    """)
 
     with ENGINE.begin() as conn:
 
         conn.execute(
             query,
             {
-                "timestamp": datetime.utcnow(),
-                "model_name": MODEL_NAME,
-                "model_version": str(MODEL_VERSION),
-                "model_alias": MODEL_ALIAS,
-                "processing_time_ms": processing_time_ms,
-                "prediction": str(prediction),
-                "probability": float(probability),
-                "request_json": json.dumps(request_json),
-                "response_json": json.dumps(response_json)
+                "timestamp":
+                    datetime.utcnow(),
+
+                "model_name":
+                    MODEL_NAME,
+
+                "model_version":
+                    str(MODEL_VERSION),
+
+                "model_alias":
+                    MODEL_ALIAS,
+
+                "processing_time_ms":
+                    float(processing_time_ms),
+
+                "predicted_price":
+                    float(predicted_price),
+
+                "request_json":
+                    json.dumps(request_json),
+
+                "response_json":
+                    json.dumps(response_json)
             }
         )
-
-# ============================================================
-# 🚀 STARTUP
-# ============================================================
-
-@app.on_event("startup")
-def startup_event():
-
-    print("🚀 Starting inference API...")
-
-    create_inference_table()
-
-
-    try:
-
-        load_champion_model()
-
-    except Exception as e:
-
-        print(
-            "⚠️ No champion model available yet"
-        )
-
-        print(str(e))
-
-    print("✅ API ready")
 
 # ============================================================
 # ❤️ HEALTH
 # ============================================================
 
-
 @app.get("/health")
 def health():
 
-    # --------------------------------------------------------
-    # TRY REFRESH MODEL
-    # --------------------------------------------------------
-
-    refresh_model_if_needed()
+    refresh_model()
 
     return {
-        "status": (
-            "ok"
-            if MODEL is not None
-            else "degraded"
-        ),
-        "model_loaded": MODEL is not None,
-        "model_version": MODEL_VERSION,
-        "model_loaded_at": MODEL_LOADED_AT
+        "status": "ok" if MODEL else "down",
+        "model_version": MODEL_VERSION
     }
 
 
 # ============================================================
-# 🤖 MODEL INFO
-# ============================================================
-
-@app.get("/model-info")
-def model_info():
-
-    return {
-        "model_name": MODEL_NAME,
-        "model_version": MODEL_VERSION,
-        "model_alias": MODEL_ALIAS,
-        "loaded_at": MODEL_LOADED_AT
-    }
-
-# ============================================================
-# 📊 PROMETHEUS METRICS ENDPOINT
+# 📊 METRICS
 # ============================================================
 
 @app.get("/metrics")
 def metrics():
+
     return Response(
         generate_latest(),
         media_type=CONTENT_TYPE_LATEST
     )
-# ============================================================
-# 🔮 PREDICT
-# ============================================================
-
-@app.post("/predict")
-def predict(payload: dict):
-
-    start_time = time.time()
-    REQUEST_COUNT.inc()
-
-    try:
-
-        refresh_model_if_needed()
-
-        if MODEL is None:
-
-            PREDICTION_ERRORS.inc()
-            ERROR_COUNT.inc()
-            raise HTTPException(
-                status_code=503,
-                detail="No champion model available"
-            )
-
-        validated_payload = validate_payload(
-            payload
-        )
-
-        input_df = pd.DataFrame(
-            [validated_payload]
-        )
-
-        prediction = MODEL.predict(
-            input_df
-        )[0]
-
-        PREDICTION_COUNT.inc()
-
-        probability = (
-            MODEL.predict_proba(input_df)[0][1]
-        )
-
-        processing_time_ms = (
-            time.time() - start_time
-        ) * 1000
-
-
-
-        # ----------------------------------------------------
-        # PROMETHEUS
-        # ----------------------------------------------------
-
-        
-
-        REQUEST_LATENCY.observe(
-            processing_time_ms / 1000
-        )
-        response = {
-            "prediction": int(prediction),
-            "probability": float(probability),
-            "model_name": MODEL_NAME,
-            "model_version": MODEL_VERSION,
-            "model_alias": MODEL_ALIAS,
-            "processing_time_ms": round(
-                processing_time_ms,
-                2
-            )
-        }
-
-        log_inference(
-            request_json=payload,
-            response_json=response,
-            prediction=prediction,
-            probability=probability,
-            processing_time_ms=processing_time_ms
-        )
-
-        return response
-
-    except Exception:
-
-        PREDICTION_ERRORS.inc()
-
-        raise
-
-
-# ============================================================
-# 📦 FEATURE METADATA
-# ============================================================
-
-@app.get("/feature-metadata")
-def feature_metadata():
-
-    refresh_model_if_needed()
-
-    if FEATURE_METADATA is None:
-
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "No feature metadata available"
-            )
-        )
-
-    return {
-        "model_name": MODEL_NAME,
-        "model_version": MODEL_VERSION,
-        "features": FEATURE_METADATA
-    }
-
-
-# ============================================================
-# 🎲 RANDOM VALID PAYLOAD
-# ============================================================
-
-@app.get("/sample-payload")
-def sample_payload():
-    """
-    Returns a valid payload using feature_metadata.
-    Useful for testing and load testing.
-    """
-
-    refresh_model_if_needed()
-
-    if FEATURE_METADATA is None:
-
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "No feature metadata available"
-            )
-        )
-
-    sample = {}
-
-    # --------------------------------------------------------
-    # GENERATE VALID VALUES
-    # --------------------------------------------------------
-
-    for feature_name, metadata in (
-        FEATURE_METADATA.items()
-    ):
-
-        # ----------------------------------------------------
-        # CATEGORICAL
-        # ----------------------------------------------------
-
-        if metadata["type"] == "categorical":
-
-            values = metadata["values"]
-
-            if not values:
-
-                sample[feature_name] = ""
-
-            else:
-
-                sample[feature_name] = (
-                    random.choice(values)
-                )
-
-        # ----------------------------------------------------
-        # NUMERIC
-        # ----------------------------------------------------
-
-        else:
-
-            min_value = metadata["min"]
-            max_value = metadata["max"]
-
-            # safety fallback
-            if (
-                min_value is None
-                or max_value is None
-            ):
-
-                sample[feature_name] = 0
-
-            else:
-
-                # integer-like values
-                if (
-                    float(min_value).is_integer()
-                    and float(max_value).is_integer()
-                ):
-
-                    sample[feature_name] = (
-                        random.randint(
-                            int(min_value),
-                            int(max_value)
-                        )
-                    )
-
-                # float values
-                else:
-
-                    sample[feature_name] = round(
-                        random.uniform(
-                            float(min_value),
-                            float(max_value)
-                        ),
-                        4
-                    )
-
-    return {
-        "model_name": MODEL_NAME,
-        "model_version": MODEL_VERSION,
-        "model_alias": MODEL_ALIAS,
-        "payload": sample
-    }

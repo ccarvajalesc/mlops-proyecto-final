@@ -20,6 +20,7 @@ from src.utils import (
     promote_model,
     reject_model,
     end_pipeline,
+    create_tables
 )
 
 default_args = {
@@ -165,6 +166,11 @@ with DAG(
         python_callable=start,
     )
 
+    task_create_tables = PythonOperator(
+        task_id="create_db_tables",
+        python_callable=create_tables,
+    )
+
     task_ingest = PythonOperator(
         task_id="fetch_and_store_raw_batch",
         python_callable=fetch_and_store_raw_batch,
@@ -279,6 +285,7 @@ with DAG(
     # Flujo de ingesta y preprocesamiento
     (
         task_start
+        >> task_create_tables
         >> task_ingest
         >> task_validate_schema
         >> task_validate_quality

@@ -50,6 +50,13 @@ MLFLOW_EXPERIMENT = (
 )
 MODEL_NAME = "real_estate_price_model"
 
+mlflow.set_experiment(
+    MLFLOW_EXPERIMENT
+)
+mlflow.set_tracking_uri(
+    MLFLOW_TRACKING_URI
+)
+
 MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "minio:9000") 
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ROOT_USER")
 MINIO_SECRET_KEY = os.environ.get("MINIO_ROOT_PASSWORD")

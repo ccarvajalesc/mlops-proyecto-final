@@ -616,6 +616,8 @@ def create_inference_table():
 
     print("Inference table ready")
 
+create_inference_table()
+
 def log_inference(
     request_json,
     response_json,

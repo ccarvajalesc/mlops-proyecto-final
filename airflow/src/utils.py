@@ -106,7 +106,7 @@ TEST_SIZE = 0.15
 # CONFIG
 # =========================
 
-API_BASE_URL = "http://get-data-api:8003"
+API_BASE_URL = "http://get-data-api:80"
 GROUP_NUMBER = 3
 
 MYSQL_USER = "mlops_user"

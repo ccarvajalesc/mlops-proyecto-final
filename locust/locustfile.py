@@ -1,5 +1,6 @@
 from locust import HttpUser, task, between
 
+
 # ============================================================
 # LOCUST USER
 # ============================================================
@@ -8,29 +9,28 @@ class UsuarioDeCarga(HttpUser):
 
     wait_time = between(0.1, 0.5)
 
-    # --------------------------------------------------------
-    # ON START
-    # --------------------------------------------------------
+    # ========================================================
+    # STARTUP
+    # ========================================================
 
     def on_start(self):
-        """
-        Fetch one valid payload from API.
-        """
 
         self.payload = None
 
         response = self.client.get(
-            "/sample-payload"
+            "/sample"
         )
 
         if response.status_code == 200:
 
-            self.payload = (
-                response.json()["payload"]
-            )
+            body = response.json()
+
+            self.payload = body["payload"]
 
             print(
-                "✅ Payload loaded"
+                f"✅ Payload loaded "
+                f"(model_version="
+                f"{body['model_version']})"
             )
 
         else:
@@ -39,9 +39,13 @@ class UsuarioDeCarga(HttpUser):
                 "❌ Could not load payload"
             )
 
-    # --------------------------------------------------------
+            print(
+                response.text
+            )
+
+    # ========================================================
     # PREDICT
-    # --------------------------------------------------------
+    # ========================================================
 
     @task
     def hacer_inferencia(self):
@@ -50,15 +54,22 @@ class UsuarioDeCarga(HttpUser):
 
             return
 
-        response = self.client.post(
+        with self.client.post(
             "/predict",
-            json=self.payload
-        )
+            json=self.payload,
+            catch_response=True
+        ) as response:
 
-        if response.status_code != 200:
+            if response.status_code == 200:
 
-            print(
-                "❌ Error:"
-            )
+                response.success()
 
-            print(response.text)
+            else:
+
+                response.failure(
+                    (
+                        f"Status="
+                        f"{response.status_code} "
+                        f"{response.text}"
+                    )
+                )

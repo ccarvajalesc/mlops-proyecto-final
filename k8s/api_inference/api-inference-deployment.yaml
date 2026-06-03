@@ -36,7 +36,7 @@ spec:
               memory: "768Mi"
               cpu: "1000m"
 
-          image: karabaharesu/mlops-final-api-inference:14
+          image: karabaharesu/mlops-final-api-inference:15
           imagePullPolicy: Always
 
           ports:

@@ -21,6 +21,11 @@ spec:
         io.kompose.service: streamlit-ui
     spec:
       containers:
+        - envFrom:
+              - configMapRef:
+                  name: mlops-config
+              - secretRef:
+                  name: mlops-secrets
         - image: karabaharesu/mlops-final-streamlit-ui:22
           name: streamlit-ui
           resources:

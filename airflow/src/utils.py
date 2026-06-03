@@ -1,42 +1,32 @@
 import os
 import json
-import warnings
+from datetime import datetime
+from typing import List, Dict, Optional
+
 import pandas as pd
 import numpy as np
 import requests
-import sqlalchemy as sa
 
-from sqlalchemy import create_engine
-from sqlalchemy.engine import Engine
-from sqlalchemy import text
-
-from catboost import CatBoostClassifier
-
+from sqlalchemy import create_engine, text
+from sklearn.model_selection import train_test_split
+from catboost import CatBoostRegressor
 from sklearn.metrics import (
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
-    roc_auc_score
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score
 )
-import tempfile
-import joblib
+
 import mlflow
 import mlflow.catboost
 from mlflow.tracking import MlflowClient
 from mlflow.models.signature import infer_signature
 
 from minio import Minio
-import os
-
-
-from sklearn.model_selection import train_test_split
-
-from datetime import datetime
-from typing import List, Dict, Optional
 
 # MinIO / S3
 os.environ["MLFLOW_S3_ENDPOINT_URL"] = os.environ.get("MLFLOW_S3_ENDPOINT_URL", "http://minio:9000")
+client = MlflowClient()
+BUCKET_LOGS = "pipeline-logs"
 
 # Credenciales MinIO
 os.environ["AWS_ACCESS_KEY_ID"] = os.environ.get("AWS_ACCESS_KEY_ID")
@@ -53,7 +43,11 @@ MYSQL_USER = os.environ.get("MYSQL_USER", "mlops_user")
 MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD", "mlops_pass")
 
 MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-MLFLOW_EXPERIMENT = os.environ.get("MLFLOW_EXPERIMENT", "diabetes_readmission_experiment")
+#MLFLOW_EXPERIMENT = os.environ.get("MLFLOW_EXPERIMENT", "diabetes_readmission_experiment")
+MLFLOW_EXPERIMENT = (
+    "real_estate_price_prediction"
+)
+MODEL_NAME = "real_estate_price_model"
 
 MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "minio:9000") 
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ROOT_USER")
@@ -67,6 +61,8 @@ DROP_COLUMNS = [
     "readmitted",
     TARGET_COLUMN
 ]
+
+
 
 
 # ============================================================
@@ -106,1793 +102,1895 @@ TRAIN_SIZE = 0.7
 VAL_SIZE = 0.15
 TEST_SIZE = 0.15
 
+# =========================
+# CONFIG
+# =========================
 
-# ============================================================
-# 🔌 CREAR CONEXIÓN SQLALCHEMY
-# ============================================================
+API_BASE_URL = "http://localhost:8003"
+GROUP_NUMBER = 3
 
-def create_engine_connection() -> Engine:
-    """
-    Crea y retorna una conexión SQLAlchemy hacia MySQL.
+MYSQL_USER = "mlops_user"
+MYSQL_PASSWORD = "mlops_pass"
+MYSQL_HOST = "localhost"
+MYSQL_PORT = "3306"
+MYSQL_DATABASE = "mlops_db"
 
-    Returns
-    -------
-    Engine
-        Engine de SQLAlchemy conectado a MySQL.
-    """
+ENGINE = create_engine(
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}"
+)
 
-    engine = sa.create_engine(
-        DATABASE_URL,
-        pool_pre_ping=True
+
+FEATURES = [
+
+    "status",
+    "city",
+    "state",
+    "zip_code",
+
+    "bed",
+    "bath",
+    "acre_lot",
+    "house_size",
+    "years_since_last_sale"
+]
+
+TARGET = "price"
+
+CATEGORICAL_FEATURES = [
+
+    "status",
+    "city",
+    "state",
+    "zip_code"
+]
+
+from datetime import datetime
+import pandas as pd
+
+
+def save_batch_statistic(
+    batch_number,
+    feature_name,
+    mean_value=None,
+    std_value=None,
+    new_categories_count=None
+):
+
+    row = pd.DataFrame([{
+        "batch_number": batch_number,
+        "feature_name": feature_name,
+        "mean_value": mean_value,
+        "std_value": std_value,
+        "new_categories_count": new_categories_count,
+        "used_for_training": False,
+        "created_at": datetime.now()
+    }])
+
+    row.to_sql(
+        "batch_statistics",
+        ENGINE,
+        if_exists="append",
+        index=False
     )
 
-    return engine
+
+from sqlalchemy import text
 
 
+def create_tables():
 
-# ============================================================
-# 🩺 VALIDAR DISPONIBILIDAD API
-# ============================================================
+    ddl_raw = """
+    CREATE TABLE IF NOT EXISTS raw_data (
 
-def validate_api_health() -> bool:
-    """
-    Verifica que la API se encuentre disponible.
+        raw_id BIGINT AUTO_INCREMENT PRIMARY KEY,
 
-    Returns
-    -------
-    bool
-        True si la API responde correctamente.
-    """
+        batch_number INT,
+        ingestion_timestamp DATETIME,
 
-    response = requests.get(HEALTH_ENDPOINT)
-
-    if response.status_code != 200:
-        raise Exception(
-            f"API no disponible. Status code: {response.status_code}"
-        )
-
-    print("✅ API disponible")
-
-    return True
-
-
-# ============================================================
-# 📥 OBTENER BATCH DE DATOS
-# ============================================================
-
-def fetch_batch(batch_size: int = 1000) -> pd.DataFrame:
-    """
-    Consume el endpoint batch de la API y retorna un DataFrame.
-
-    Parameters
-    ----------
-    batch_size : int
-        Cantidad de registros solicitados.
-
-    Returns
-    -------
-    pd.DataFrame
-        Datos obtenidos desde la API.
+        brokered_by DOUBLE,
+        status VARCHAR(100),
+        price DOUBLE,
+        bed DOUBLE,
+        bath DOUBLE,
+        acre_lot DOUBLE,
+        street DOUBLE,
+        city VARCHAR(255),
+        state VARCHAR(255),
+        zip_code VARCHAR(30),
+        house_size DOUBLE,
+        prev_sold_date VARCHAR(50)
+    );
     """
 
-    params = {
-        "batch_size": batch_size
-    }
+    ddl_clean = """
+    CREATE TABLE IF NOT EXISTS clean_data (
+
+        clean_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+        raw_id BIGINT,
+        batch_number INT,
+        processed_timestamp DATETIME,
+
+        brokered_by DOUBLE,
+        status VARCHAR(100),
+        price DOUBLE,
+        bed DOUBLE,
+        bath DOUBLE,
+        acre_lot DOUBLE,
+        street DOUBLE,
+        city VARCHAR(255),
+        state VARCHAR(255),
+        zip_code VARCHAR(30),
+        house_size DOUBLE,
+
+        prev_sold_date DATE,
+        years_since_last_sale DOUBLE,
+
+        dataset_split VARCHAR(20)
+    );
+    """
+
+    ddl_monitoring = """
+    CREATE TABLE IF NOT EXISTS data_monitoring (
+
+        monitoring_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+        batch_number INT,
+        check_type VARCHAR(100),
+        feature_name VARCHAR(100),
+        metric_name VARCHAR(100),
+
+        metric_value DOUBLE NULL,
+
+        details TEXT,
+
+        created_at DATETIME
+    );
+    """
+
+    ddl_batch_statistics = """
+    CREATE TABLE IF NOT EXISTS batch_statistics (
+
+        stat_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+        batch_number INT NOT NULL,
+
+        feature_name VARCHAR(100) NOT NULL,
+
+        mean_value DOUBLE NULL,
+
+        std_value DOUBLE NULL,
+
+        new_categories_count INT NULL,
+
+        used_for_training BOOLEAN DEFAULT FALSE,
+
+        created_at DATETIME
+    );
+    """
+    ddl_training_runs = """
+    CREATE TABLE IF NOT EXISTS training_runs (
+    
+        run_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    
+        triggering_batch INT,
+    
+        mlflow_run_id VARCHAR(255),
+    
+        candidate_rmse DOUBLE,
+        candidate_mae DOUBLE,
+        candidate_r2 DOUBLE,
+    
+        promoted BOOLEAN,
+    
+        created_at DATETIME
+    );
+    """
+    with ENGINE.begin() as conn:
+
+        conn.execute(text(ddl_raw))
+        conn.execute(text(ddl_clean))
+        conn.execute(text(ddl_monitoring))
+        conn.execute(text(ddl_batch_statistics))
+        conn.execute(text(ddl_training_runs))
+
+    print("Tables verified.")
+
+
+def log_monitoring(
+    batch_number,
+    check_type,
+    feature_name,
+    metric_name,
+    metric_value=None,
+    details=None
+):
+
+    row = pd.DataFrame([{
+        "batch_number": batch_number,
+        "check_type": check_type,
+        "feature_name": feature_name,
+        "metric_name": metric_name,
+        "metric_value": metric_value,
+        "details": details,
+        "created_at": datetime.now()
+    }])
+
+    row.to_sql(
+        "data_monitoring",
+        ENGINE,
+        if_exists="append",
+        index=False
+    )
+
+
+
+def start():
+
+    print("Checking API health...")
 
     response = requests.get(
-        BATCH_ENDPOINT,
-        params=params
+        f"{API_BASE_URL}/health",
+        timeout=30
     )
 
     if response.status_code != 200:
-        raise Exception(
-            f"Error consumiendo batch API: {response.text}"
+        raise RuntimeError(
+            f"Health check failed: {response.status_code}"
         )
+
+    print("API health OK")
+
+
+def fetch_and_store_raw_batch():
+
+    response = requests.get(
+        f"{API_BASE_URL}/data",
+        params={"group_number": GROUP_NUMBER},
+        timeout=60
+    )
+
+    response.raise_for_status()
 
     payload = response.json()
 
-    data = payload["data"]
+    batch_number = payload["batch_number"]
 
-    df = pd.DataFrame(data)
-
-    print(f"✅ Batch obtenido: {len(df)} registros")
-
-    return df
-
-
-# ============================================================
-# 🧹 NORMALIZAR MISSING VALUES
-# ============================================================
-
-def normalize_missing_values(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Reemplaza los valores '?' por None/NaN.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame original.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame limpio.
-    """
-
-    df = df.replace("?", "missing")
-    df = df.fillna("missing")
-
-    return df
-
-
-# ============================================================
-# 🔤 NORMALIZAR NOMBRES COLUMNAS
-# ============================================================
-
-def normalize_column_names(
-    df: pd.DataFrame
-) -> pd.DataFrame:
-    """
-    Normaliza nombres de columnas para SQL.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-
-    Returns
-    -------
-    pd.DataFrame
-    """
-
-    df = df.copy()
-
-    df.columns = [
-        col.replace("-", "_")
-        .replace(" ", "_")
-        .lower()
-        for col in df.columns
-    ]
-
-    return df
-
-# ============================================================
-# 🧾 CREAR TABLA RAW
-# ============================================================
-
-def create_raw_table(
-    engine: Engine,
-    sample_df: pd.DataFrame,
-    drop_if_exists: bool = False
-):
-    """
-    Crea la tabla RAW dinámicamente a partir
-    de las columnas retornadas por la API.
-
-    Parameters
-    ----------
-    engine : Engine
-
-    sample_df : pd.DataFrame
-
-    drop_if_exists : bool
-        Si es True elimina la tabla antes de crearla.
-    """
-
-    with engine.begin() as conn:
-
-        # --------------------------------------------------
-        # DROP TABLE
-        # --------------------------------------------------
-        if drop_if_exists:
-
-            conn.execute(
-                text(f"DROP TABLE IF EXISTS {RAW_TABLE}")
-            )
-
-            print("⚠️ Tabla RAW eliminada")
-
-        # --------------------------------------------------
-        # COLUMNAS DINÁMICAS
-        # --------------------------------------------------
-        columns_sql = []
-
-        for col in sample_df.columns:
-
-            safe_col = col.replace("-", "_")
-
-            if col == "encounter_id":
-                col_type = "BIGINT"
-
-            elif pd.api.types.is_numeric_dtype(sample_df[col]):
-                col_type = "DOUBLE"
-
-            else:
-                col_type = "TEXT"
-
-            columns_sql.append(
-                f"`{safe_col}` {col_type}"
-            )
-
-        # --------------------------------------------------
-        # METADATA
-        # --------------------------------------------------
-        metadata_cols = [
-            "`load_id` VARCHAR(100)",
-            "`load_timestamp` DATETIME",
-            "`source` VARCHAR(100)",
-            "`record_status` VARCHAR(50)"
-        ]
-
-        columns_sql.extend(metadata_cols)
-
-        # --------------------------------------------------
-        # CREATE TABLE
-        # --------------------------------------------------
-        create_sql = f"""
-        CREATE TABLE {RAW_TABLE} (
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            {",".join(columns_sql)},
-            UNIQUE (`encounter_id`)
-        )
-        """
-
-        conn.execute(text(create_sql))
-
-    print("✅ Tabla RAW creada correctamente")
-
-
-# ============================================================
-# 🧾 CREAR TABLA RAW
-# ============================================================
-
-def create_raw_table(
-    engine: Engine,
-    sample_df: pd.DataFrame,
-    drop_if_exists: bool = False
-):
-    """
-    Crea la tabla RAW dinámicamente.
-
-    Parameters
-    ----------
-    engine : Engine
-
-    sample_df : pd.DataFrame
-
-    drop_if_exists : bool
-        Si es True elimina la tabla antes de crearla.
-    """
-
-    with engine.begin() as conn:
-
-        # --------------------------------------------------
-        # DROP TABLE
-        # --------------------------------------------------
-        if drop_if_exists:
-
-            conn.execute(
-                text(f"DROP TABLE IF EXISTS {RAW_TABLE}")
-            )
-
-            print("⚠️ Tabla RAW eliminada")
-
-        # --------------------------------------------------
-        # COLUMNAS
-        # --------------------------------------------------
-        columns_sql = []
-
-        for col in sample_df.columns:
-
-            safe_col = (
-                col.replace("-", "_")
-                .replace(" ", "_")
-                .lower()
-            )
-
-            if col == "encounter_id":
-                col_type = "BIGINT"
-
-            elif pd.api.types.is_numeric_dtype(
-                sample_df[col]
-            ):
-                col_type = "DOUBLE"
-
-            else:
-                col_type = "TEXT"
-
-            columns_sql.append(
-                f"`{safe_col}` {col_type}"
-            )
-
-        # --------------------------------------------------
-        # METADATA
-        # --------------------------------------------------
-        metadata_cols = [
-            "`load_id` VARCHAR(100)",
-            "`load_timestamp` DATETIME",
-            "`source` VARCHAR(100)",
-            "`record_status` VARCHAR(50)"
-        ]
-
-        columns_sql.extend(metadata_cols)
-
-        # --------------------------------------------------
-        # CREATE SQL
-        # --------------------------------------------------
-        create_sql = f"""
-        CREATE TABLE IF NOT EXISTS {RAW_TABLE} (
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            {",".join(columns_sql)},
-            UNIQUE (`encounter_id`)
-        )
-        """
-
-        conn.execute(text(create_sql))
-
-    print("✅ Tabla RAW validada")
-
-
-# ============================================================
-# 🔍 VALIDACIONES BÁSICAS
-# ============================================================
-
-def validate_raw_data(df: pd.DataFrame):
-    """
-    Ejecuta validaciones básicas de calidad.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame a validar.
-    """
+    df = pd.DataFrame(payload["data"])
 
     if df.empty:
-        raise Exception("DataFrame vacío")
+        raise ValueError("Batch returned empty")
 
-    if "encounter_id" not in df.columns:
-        raise Exception("No existe encounter_id")
+    df["batch_number"] = batch_number
+    df["ingestion_timestamp"] = datetime.now()
 
-    duplicated = df["encounter_id"].duplicated().sum()
+    if "zip" in df.columns:
+        df.rename(columns={"zip": "zip_code"}, inplace=True)
 
-    if duplicated > 0:
-        raise Exception(
-            f"Existen {duplicated} duplicados"
+    if "zip_code" in df.columns:
+        df["zip_code"] = df["zip_code"].astype(str)
+
+    df.to_sql(
+        "raw_data",
+        ENGINE,
+        if_exists="append",
+        index=False
+    )
+
+    print(
+        f"Stored {len(df)} rows for batch {batch_number}"
+    )
+
+    return batch_number
+
+
+def validate_schema():
+
+    query = """
+    SELECT MAX(batch_number)
+    FROM raw_data
+    """
+
+    batch_number = pd.read_sql(query, ENGINE).iloc[0,0]
+
+    df = pd.read_sql(
+        f"""
+        SELECT *
+        FROM raw_data
+        WHERE batch_number={batch_number}
+        """,
+        ENGINE
+    )
+
+    required_columns = [
+        "brokered_by",
+        "status",
+        "price",
+        "bed",
+        "bath",
+        "acre_lot",
+        "street",
+        "city",
+        "state",
+        "zip_code",
+        "house_size",
+        "prev_sold_date"
+    ]
+
+    missing = [
+        c
+        for c in required_columns
+        if c not in df.columns
+    ]
+
+    if missing:
+
+        log_monitoring(
+            batch_number,
+            "schema_validation",
+            "dataset",
+            "missing_columns",
+            details=json.dumps(missing)
         )
 
-    print("✅ Validaciones básicas completadas")
+        raise ValueError(
+            f"Missing columns: {missing}"
+        )
+
+    log_monitoring(
+        batch_number,
+        "schema_validation",
+        "dataset",
+        "schema_ok"
+    )
+
+    print("Schema validation OK")
 
 
-# ============================================================
-# 🧼 PREPROCESAMIENTO CLEAN
-# ============================================================
+def validate_data_quality():
 
-def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Ejecuta transformaciones básicas sobre los datos.
+    batch_number = pd.read_sql(
+        "SELECT MAX(batch_number) batch_number FROM raw_data",
+        ENGINE
+    ).iloc[0,0]
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame RAW.
+    df = pd.read_sql(
+        f"""
+        SELECT *
+        FROM raw_data
+        WHERE batch_number={batch_number}
+        """,
+        ENGINE
+    )
 
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame transformado.
-    """
+    duplicates = df.duplicated().sum()
 
-    df = df.copy()
+    log_monitoring(
+        batch_number,
+        "quality_validation",
+        "dataset",
+        "duplicates",
+        duplicates
+    )
 
-    # ----------------------------------------
-    # NORMALIZAR MISSING
-    # ----------------------------------------
-    df = normalize_missing_values(df)
+    for col in df.columns:
 
-    # ----------------------------------------
-    # CONVERTIR COLUMNAS NUMÉRICAS
-    # ----------------------------------------
+        nulls = int(df[col].isna().sum())
+
+        log_monitoring(
+            batch_number,
+            "quality_validation",
+            col,
+            "null_count",
+            nulls
+        )
+
+    invalid_price = (df["price"] <= 0).sum()
+
+    log_monitoring(
+        batch_number,
+        "quality_validation",
+        "price",
+        "invalid_price",
+        int(invalid_price)
+    )
+
+    print("Quality validation completed")
+
+
+def get_latest_batch():
+
+    return pd.read_sql(
+        """
+        SELECT MAX(batch_number) AS batch_number
+        FROM raw_data
+        """,
+        ENGINE
+    ).iloc[0, 0]
+
+
+
+def detect_new_categories():
+
+    categorical_cols = ["brokered_by",
+                        "street",
+                        "status",
+                        "city",
+                        "state",
+                        "zip_code"
+                    ]
+
+    batch_number = pd.read_sql(
+        """
+        SELECT MAX(batch_number) AS batch_number
+        FROM raw_data
+        """,
+        ENGINE
+    ).iloc[0, 0]
+
+    current = pd.read_sql(
+        f"""
+        SELECT *
+        FROM raw_data
+        WHERE batch_number = {batch_number}
+        """,
+        ENGINE
+    )
+
+    history = pd.read_sql(
+        f"""
+        SELECT *
+        FROM raw_data
+        WHERE batch_number < {batch_number}
+        """,
+        ENGINE
+    )
+
+    rows = []
+
+    for col in categorical_cols:
+
+        current_values = set(
+            current[col]
+            .dropna()
+            .astype(str)
+        )
+
+        if history.empty:
+
+            # primer batch:
+            # todas las categorías son nuevas
+            new_categories_count = len(current_values)
+
+        else:
+
+            historical_values = set(
+                history[col]
+                .dropna()
+                .astype(str)
+            )
+
+            new_categories_count = len(
+                current_values - historical_values
+            )
+
+        rows.append({
+            "batch_number": batch_number,
+            "feature_name": col,
+            "mean_value": None,
+            "std_value": None,
+            "new_categories_count": new_categories_count,
+            "used_for_training": False,
+            "created_at": pd.Timestamp.now()
+        })
+
+    pd.DataFrame(rows).to_sql(
+        "batch_statistics",
+        ENGINE,
+        if_exists="append",
+        index=False
+    )
+
+    print(
+        f"Stored category statistics for batch {batch_number}"
+    )
+
+
+def detect_data_drift():
+
+    numeric_cols = ["price",
+                    "bed",
+                    "bath",
+                    "acre_lot",
+                    "house_size"
+                ]
+
+    batch_number = pd.read_sql(
+        """
+        SELECT MAX(batch_number) AS batch_number
+        FROM raw_data
+        """,
+        ENGINE
+    ).iloc[0, 0]
+
+    current = pd.read_sql(
+        f"""
+        SELECT *
+        FROM raw_data
+        WHERE batch_number = {batch_number}
+        """,
+        ENGINE
+    )
+
+    rows = []
+
+    for col in numeric_cols:
+
+        rows.append({
+                "batch_number": batch_number,
+                "feature_name": col,
+                "mean_value": current[col].mean(),
+                "std_value": current[col].std(),
+                "new_categories_count": None,
+                "used_for_training": False,
+                "created_at": pd.Timestamp.now()
+            })
+
+    pd.DataFrame(rows).to_sql(
+        "batch_statistics",
+        ENGINE,
+        if_exists="append",
+        index=False
+    )
+
+    print(
+        f"Stored numerical statistics for batch {batch_number}"
+    )
+
+
+def preprocess_data():
+
+    batch_number = pd.read_sql(
+        "SELECT MAX(batch_number) batch_number FROM raw_data",
+        ENGINE
+    ).iloc[0,0]
+
+    raw_df = pd.read_sql(
+        f"""
+        SELECT *
+        FROM raw_data
+        WHERE batch_number={batch_number}
+        """,
+        ENGINE
+    )
+
+    df = raw_df.copy()
+
     numeric_cols = [
-        "time_in_hospital",
-        "num_lab_procedures",
-        "num_procedures",
-        "num_medications",
-        "number_outpatient",
-        "number_emergency",
-        "number_inpatient",
-        "number_diagnoses"
+        "brokered_by",
+        "price",
+        "bed",
+        "bath",
+        "acre_lot",
+        "street",
+        "house_size"
+    ]
+
+    categorical_cols = [
+        "status",
+        "city",
+        "state",
+        "zip_code"
     ]
 
     for col in numeric_cols:
 
-        if col in df.columns:
-            df[col] = pd.to_numeric(
-                df[col],
-                errors="coerce"
+        df[col] = pd.to_numeric(
+            df[col],
+            errors="coerce"
+        )
+
+    for col in numeric_cols:
+
+        df[col] = df[col].fillna(
+            df[col].median()
+        )
+
+    for col in categorical_cols:
+
+        mode = (
+            df[col].mode().iloc[0]
+            if not df[col].mode().empty
+            else "UNKNOWN"
+        )
+
+        df[col] = df[col].fillna(mode)
+
+    df["prev_sold_date"] = pd.to_datetime(
+        df["prev_sold_date"],
+        errors="coerce"
+    )
+
+    today = pd.Timestamp.today()
+
+    df["years_since_last_sale"] = (
+        (today - df["prev_sold_date"]).dt.days
+        / 365.25
+    )
+
+    df["years_since_last_sale"] = (
+        df["years_since_last_sale"]
+        .fillna(
+            df["years_since_last_sale"].median()
+        )
+    )
+
+    before = len(df)
+
+    df = df.drop_duplicates()
+
+    df = df[
+        (df["price"] > 0)
+        & (df["house_size"] > 0)
+        & (df["bed"] >= 0)
+        & (df["bath"] >= 0)
+        & (df["acre_lot"] >= 0)
+    ]
+
+    removed = before - len(df)
+
+    log_monitoring(
+        batch_number,
+        "preprocessing",
+        "dataset",
+        "rows_removed",
+        removed
+    )
+
+    train_df, temp_df = train_test_split(
+        df,
+        test_size=0.20,
+        random_state=42
+    )
+
+    valid_df, test_df = train_test_split(
+        temp_df,
+        test_size=0.50,
+        random_state=42
+    )
+
+    train_df["dataset_split"] = "train"
+    valid_df["dataset_split"] = "validation"
+    test_df["dataset_split"] = "test"
+
+    clean_df = pd.concat(
+        [
+            train_df,
+            valid_df,
+            test_df
+        ],
+        ignore_index=True
+    )
+
+    clean_df["processed_timestamp"] = datetime.now()
+
+    cols = [
+        "raw_id",
+        "batch_number",
+        "processed_timestamp",
+        "brokered_by",
+        "status",
+        "price",
+        "bed",
+        "bath",
+        "acre_lot",
+        "street",
+        "city",
+        "state",
+        "zip_code",
+        "house_size",
+        "prev_sold_date",
+        "years_since_last_sale",
+        "dataset_split"
+    ]
+
+    clean_df[cols].to_sql(
+        "clean_data",
+        ENGINE,
+        if_exists="append",
+        index=False
+    )
+
+    print(
+        f"Inserted {len(clean_df)} rows into clean_data"
+    )
+
+
+
+def preprocess_data():
+
+    batch_number = pd.read_sql(
+        "SELECT MAX(batch_number) batch_number FROM raw_data",
+        ENGINE
+    ).iloc[0,0]
+
+    raw_df = pd.read_sql(
+        f"""
+        SELECT *
+        FROM raw_data
+        WHERE batch_number={batch_number}
+        """,
+        ENGINE
+    )
+
+    df = raw_df.copy()
+
+    numeric_cols = [
+        "brokered_by",
+        "price",
+        "bed",
+        "bath",
+        "acre_lot",
+        "street",
+        "house_size"
+    ]
+
+    categorical_cols = [
+        "status",
+        "city",
+        "state",
+        "zip_code"
+    ]
+
+    for col in numeric_cols:
+
+        df[col] = pd.to_numeric(
+            df[col],
+            errors="coerce"
+        )
+
+    for col in numeric_cols:
+
+        df[col] = df[col].fillna(
+            df[col].median()
+        )
+
+    for col in categorical_cols:
+
+        mode = (
+            df[col].mode().iloc[0]
+            if not df[col].mode().empty
+            else "UNKNOWN"
+        )
+
+        df[col] = df[col].fillna(mode)
+
+    df["prev_sold_date"] = pd.to_datetime(
+        df["prev_sold_date"],
+        errors="coerce"
+    )
+
+    today = pd.Timestamp.today()
+
+    df["years_since_last_sale"] = (
+        (today - df["prev_sold_date"]).dt.days
+        / 365.25
+    )
+
+    df["years_since_last_sale"] = (
+        df["years_since_last_sale"]
+        .fillna(
+            df["years_since_last_sale"].median()
+        )
+    )
+
+    before = len(df)
+
+    df = df.drop_duplicates()
+
+    df = df[
+        (df["price"] > 0)
+        & (df["house_size"] > 0)
+        & (df["bed"] >= 0)
+        & (df["bath"] >= 0)
+        & (df["acre_lot"] >= 0)
+    ]
+
+    removed = before - len(df)
+
+    log_monitoring(
+        batch_number,
+        "preprocessing",
+        "dataset",
+        "rows_removed",
+        removed
+    )
+
+    train_df, temp_df = train_test_split(
+        df,
+        test_size=0.20,
+        random_state=42
+    )
+
+    valid_df, test_df = train_test_split(
+        temp_df,
+        test_size=0.50,
+        random_state=42
+    )
+
+    train_df["dataset_split"] = "train"
+    valid_df["dataset_split"] = "validation"
+    test_df["dataset_split"] = "test"
+
+    clean_df = pd.concat(
+        [
+            train_df,
+            valid_df,
+            test_df
+        ],
+        ignore_index=True
+    )
+
+    clean_df["processed_timestamp"] = datetime.now()
+
+    cols = [
+        "raw_id",
+        "batch_number",
+        "processed_timestamp",
+        "brokered_by",
+        "status",
+        "price",
+        "bed",
+        "bath",
+        "acre_lot",
+        "street",
+        "city",
+        "state",
+        "zip_code",
+        "house_size",
+        "prev_sold_date",
+        "years_since_last_sale",
+        "dataset_split"
+    ]
+
+    clean_df[cols].to_sql(
+        "clean_data",
+        ENGINE,
+        if_exists="append",
+        index=False
+    )
+
+    print(
+        f"Inserted {len(clean_df)} rows into clean_data"
+    )
+
+
+def simulate_dag_until_preprocessing():
+
+    print("=" * 60)
+    print("START DAG")
+    print("=" * 60)
+
+    start()
+
+    batch_number = fetch_and_store_raw_batch()
+
+    validate_schema()
+
+    validate_data_quality()
+
+    detect_new_categories()
+
+    detect_data_drift()
+
+    preprocess_data()
+
+    print("=" * 60)
+    print(
+        f"PIPELINE COMPLETED - BATCH {batch_number}"
+    )
+    print("=" * 60)
+
+
+
+
+# ============================== TRAIN =====================
+
+
+from minio import Minio
+from io import BytesIO
+from datetime import datetime
+
+PIPELINE_LOG_BUCKET = "pipeline-logs"
+
+minio_client = Minio(
+    MINIO_ENDPOINT,
+    access_key=MINIO_ACCESS_KEY,
+    secret_key=MINIO_SECRET_KEY,
+    secure=False
+)
+
+
+def ensure_log_bucket():
+
+    if not minio_client.bucket_exists(
+        PIPELINE_LOG_BUCKET
+    ):
+        minio_client.make_bucket(
+            PIPELINE_LOG_BUCKET
+        )
+
+
+
+def ensure_minio_buckets():
+
+    client = Minio(
+        MINIO_ENDPOINT,
+        access_key=MINIO_ACCESS_KEY,
+        secret_key=MINIO_SECRET_KEY,
+        secure=False
+    )
+
+    for bucket in [
+        MINIO_BUCKET,
+        BUCKET_LOGS
+    ]:
+
+        if not client.bucket_exists(bucket):
+            client.make_bucket(bucket)
+
+    print("MinIO buckets verified")
+
+
+
+def append_pipeline_log(text_message):
+
+    ensure_log_bucket()
+
+    object_name = "pipeline_history.txt"
+
+    try:
+
+        response = minio_client.get_object(
+            PIPELINE_LOG_BUCKET,
+            object_name
+        )
+
+        current_content = (
+            response.read()
+            .decode("utf-8")
+        )
+
+    except:
+
+        current_content = ""
+
+    timestamp = datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    new_content = (
+        current_content
+        + "\n"
+        + "=" * 80
+        + "\n"
+        + timestamp
+        + "\n\n"
+        + text_message
+        + "\n"
+    )
+
+    data = new_content.encode("utf-8")
+
+    minio_client.put_object(
+        PIPELINE_LOG_BUCKET,
+        object_name,
+        BytesIO(data),
+        len(data),
+        content_type="text/plain"
+    )
+
+
+
+def decide_training():
+
+    NUMERIC_FEATURES = [
+        "price",
+        "bed",
+        "bath",
+        "acre_lot",
+        "house_size"
+    ]
+
+    CATEGORICAL_FEATURES = [
+        "status",
+        "city",
+        "state",
+        "zip_code"
+    ]
+
+    DRIFT_THRESHOLD = 0.25
+    MIN_NUMERIC_DRIFTS = 2
+
+    reasons = []
+
+    champion = get_current_champion()
+
+    # --------------------------------------------------
+    # Primer entrenamiento
+    # --------------------------------------------------
+
+    if champion is None:
+
+        return {
+            "should_train": True,
+            "decision": "TRAIN",
+            "reasons": [
+                "No Champion model found."
+            ]
+        }
+
+    current_batch = pd.read_sql(
+        """
+        SELECT MAX(batch_number) AS batch_number
+        FROM clean_data
+        """,
+        ENGINE
+    ).iloc[0, 0]
+
+    # --------------------------------------------------
+    # Batches usados por el Champion
+    # --------------------------------------------------
+
+    training_stats = pd.read_sql(
+        """
+        SELECT *
+        FROM batch_statistics
+        WHERE used_for_training = TRUE
+        """,
+        ENGINE
+    )
+
+    if training_stats.empty:
+
+        return {
+            "should_train": True,
+            "decision": "TRAIN",
+            "reasons": [
+                "No training reference found."
+            ]
+        }
+
+    current_stats = pd.read_sql(
+        f"""
+        SELECT *
+        FROM batch_statistics
+        WHERE batch_number = {current_batch}
+        """,
+        ENGINE
+    )
+
+    if current_stats.empty:
+
+        return {
+            "should_train": False,
+            "decision": "SKIP",
+            "reasons": [
+                f"No statistics found for batch {current_batch}"
+            ]
+        }
+
+    reasons.append(
+        f"Current batch={current_batch}"
+    )
+
+    reference_batches = sorted(
+        training_stats["batch_number"]
+        .unique()
+        .tolist()
+    )
+
+    reasons.append(
+        f"Reference batches={reference_batches}"
+    )
+
+    # --------------------------------------------------
+    # NUMERIC DRIFT
+    # --------------------------------------------------
+
+    numeric_drifts = 0
+
+    for feature in NUMERIC_FEATURES:
+
+        ref_rows = training_stats[
+            training_stats["feature_name"] == feature
+        ]
+
+        curr_rows = current_stats[
+            current_stats["feature_name"] == feature
+        ]
+
+        if ref_rows.empty or curr_rows.empty:
+            continue
+
+        ref_mean = ref_rows[
+            "mean_value"
+        ].mean()
+
+        ref_std = ref_rows[
+            "std_value"
+        ].mean()
+
+        curr_mean = curr_rows.iloc[0][
+            "mean_value"
+        ]
+
+        curr_std = curr_rows.iloc[0][
+            "std_value"
+        ]
+
+        # Mean drift
+
+        if (
+            pd.notna(ref_mean)
+            and pd.notna(curr_mean)
+            and abs(ref_mean) > 0
+        ):
+
+            mean_drift = abs(
+                curr_mean - ref_mean
+            ) / abs(ref_mean)
+
+            if mean_drift > DRIFT_THRESHOLD:
+
+                numeric_drifts += 1
+
+                reasons.append(
+                    f"{feature}: mean drift "
+                    f"{mean_drift:.2%}"
+                )
+
+        # Std drift
+
+        if (
+            pd.notna(ref_std)
+            and pd.notna(curr_std)
+            and ref_std > 0
+        ):
+
+            std_drift = abs(
+                curr_std - ref_std
+            ) / ref_std
+
+            if std_drift > DRIFT_THRESHOLD:
+
+                numeric_drifts += 1
+
+                reasons.append(
+                    f"{feature}: std drift "
+                    f"{std_drift:.2%}"
+                )
+
+    train_numeric = (
+        numeric_drifts >= MIN_NUMERIC_DRIFTS
+    )
+
+    # --------------------------------------------------
+    # CATEGORICAL DRIFT
+    # --------------------------------------------------
+
+    train_categorical = False
+
+    current_data = pd.read_sql(
+        f"""
+        SELECT
+            status,
+            city,
+            state,
+            zip_code
+        FROM clean_data
+        WHERE batch_number = {current_batch}
+        """,
+        ENGINE
+    )
+
+    historical_data = pd.read_sql(
+        """
+        SELECT
+            c.status,
+            c.city,
+            c.state,
+            c.zip_code
+        FROM clean_data c
+        INNER JOIN
+        (
+            SELECT DISTINCT batch_number
+            FROM batch_statistics
+            WHERE used_for_training = TRUE
+        ) t
+        ON c.batch_number = t.batch_number
+        """,
+        ENGINE
+    )
+
+    for feature in CATEGORICAL_FEATURES:
+
+        historical_categories = set(
+            historical_data[feature]
+            .dropna()
+            .astype(str)
+        )
+
+        current_categories = set(
+            current_data[feature]
+            .dropna()
+            .astype(str)
+        )
+
+        unseen = (
+            current_categories
+            - historical_categories
+        )
+
+        if len(unseen) > 0:
+
+            train_categorical = True
+
+            reasons.append(
+                f"{feature}: "
+                f"{len(unseen)} unseen categories"
             )
 
-    # ----------------------------------------
-    # TARGET BINARIO
-    # ----------------------------------------
-    if "readmitted" in df.columns:
+    # --------------------------------------------------
+    # FINAL DECISION
+    # --------------------------------------------------
 
-        df["target"] = (
-            df["readmitted"]
-            .apply(lambda x: 1 if x in ["<30", ">30"] else 0)
+    should_train = (
+        train_numeric
+        or train_categorical
+    )
+
+    if not should_train:
+
+        reasons.append(
+            "No numeric drift above threshold."
         )
+
+        reasons.append(
+            "No unseen categories detected."
+        )
+
+    return {
+        "should_train": should_train,
+        "decision": (
+            "TRAIN"
+            if should_train
+            else "SKIP"
+        ),
+        "reasons": reasons
+    }
+
+
+
+def skip_training(decision):
+
+    text = [
+        "",
+        "TRAINING DECISION",
+        "",
+        "Result:",
+        "SKIP TRAINING",
+        "",
+        "Reasons:",
+        ""
+    ]
+
+    for reason in decision["reasons"]:
+        text.append(
+            f"- {reason}"
+        )
+
+    append_pipeline_log(
+        "\n".join(text)
+    )
+
+
+def load_training_dataset():
+
+    query = """
+    SELECT *
+    FROM clean_data
+    """
+
+    df = pd.read_sql(
+        query,
+        ENGINE
+    )
 
     return df
 
 
-# ============================================================
-# 🎯 GENERAR SPLITS TRAIN/VAL/TEST
-# ============================================================
+def build_training_metadata(df):
 
-def assign_dataset_split(
-    df: pd.DataFrame
-) -> pd.DataFrame:
-    """
-    Asigna cada registro a train/validation/test.
+    metadata = {
 
-    Si alguna clase tiene muy pocos ejemplos,
-    se realiza un split sin estratificación.
+        "numeric_ranges": {},
 
-    Parameters
-    ----------
-    df : pd.DataFrame
+        "allowed_categories": {}
+    }
 
-    Returns
-    -------
-    pd.DataFrame
-    """
+    numeric_features = [
 
-    df = df.copy()
+        "bed",
+        "bath",
+        "acre_lot",
+        "house_size",
+        "years_since_last_sale"
+    ]
 
-    # --------------------------------------------------------
-    # VALIDAR TARGET
-    # --------------------------------------------------------
-    if "target" not in df.columns:
-        raise Exception(
-            "La columna target no existe"
+    for col in numeric_features:
+
+        metadata["numeric_ranges"][col] = {
+
+            "min": float(
+                df[col].min()
+            ),
+
+            "max": float(
+                df[col].max()
+            )
+        }
+
+    for col in CATEGORICAL_FEATURES:
+
+        metadata[
+            "allowed_categories"
+        ][col] = sorted(
+            df[col]
+            .astype(str)
+            .dropna()
+            .unique()
+            .tolist()
         )
 
-    # --------------------------------------------------------
-    # CONTEO CLASES
-    # --------------------------------------------------------
-    class_counts = df["target"].value_counts()
+    return metadata
 
-    print("\n📊 Distribución target:")
-    print(class_counts)
 
-    # --------------------------------------------------------
-    # VALIDAR SI SE PUEDE ESTRATIFICAR
-    # --------------------------------------------------------
-    can_stratify = class_counts.min() >= 2
+def train_evaluate_register_candidate():
 
-    if can_stratify:
+    df = load_training_dataset()
 
-        print("✅ Split estratificado")
+    train_df = df[
+        df["dataset_split"] == "train"
+    ].copy()
 
-        train_df, temp_df = train_test_split(
-            df,
-            test_size=(1 - TRAIN_SIZE),
-            random_state=42,
-            stratify=df["target"]
+    test_df = df[
+        df["dataset_split"] == "test"
+    ].copy()
+
+    X_train = train_df[FEATURES]
+
+    y_train = train_df[TARGET]
+
+    X_test = test_df[FEATURES]
+
+    y_test = test_df[TARGET]
+
+    model = CatBoostRegressor(
+
+        iterations=500,
+
+        learning_rate=0.05,
+
+        depth=6,
+
+        loss_function="RMSE",
+
+        verbose=False,
+
+        random_seed=42
+    )
+
+    with mlflow.start_run() as run:
+
+        model.fit(
+            X_train,
+            y_train,
+            cat_features=CATEGORICAL_FEATURES
         )
 
-        val_df, test_df = train_test_split(
-            temp_df,
-            test_size=0.5,
-            random_state=42,
-            stratify=temp_df["target"]
+        predictions = model.predict(
+            X_test
+        )
+
+        rmse = np.sqrt(
+            mean_squared_error(
+                y_test,
+                predictions
+            )
+        )
+
+        mae = mean_absolute_error(
+            y_test,
+            predictions
+        )
+
+        r2 = r2_score(
+            y_test,
+            predictions
+        )
+
+        mlflow.log_metric(
+            "rmse",
+            rmse
+        )
+
+        mlflow.log_metric(
+            "mae",
+            mae
+        )
+
+        mlflow.log_metric(
+            "r2",
+            r2
+        )
+
+        metadata = build_training_metadata(
+            df
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+
+            metadata_path = os.path.join(
+                tmpdir,
+                "training_metadata.json"
+            )
+
+            with open(
+                metadata_path,
+                "w"
+            ) as f:
+
+                json.dump(
+                    metadata,
+                    f,
+                    indent=4
+                )
+
+            mlflow.log_artifact(
+                metadata_path
+            )
+
+        model_info = mlflow.catboost.log_model(
+            model,
+            name="model"
+        )
+
+        run_id = run.info.run_id
+
+    return {
+
+        "run_id": run_id,
+
+        "model_uri":
+            model_info.model_uri,
+
+        "rmse": rmse,
+
+        "mae": mae,
+
+        "r2": r2
+    }
+
+
+
+def register_candidate_model(
+    candidate
+):
+
+    registered_model = (
+        mlflow.register_model(
+            model_uri=candidate[
+                "model_uri"
+            ],
+            name=MODEL_NAME
+        )
+    )
+
+    return registered_model.version
+
+
+
+def get_current_champion():
+
+    try:
+
+        champion = client.get_model_version_by_alias(
+            MODEL_NAME,
+            "champion"
+        )
+
+        run_id = champion.run_id
+
+        run = client.get_run(run_id)
+
+        rmse = run.data.metrics.get("rmse")
+
+        return {
+            "version": champion.version,
+            "run_id": run_id,
+            "rmse": rmse
+        }
+
+    except Exception:
+
+        return None
+    
+
+
+
+def get_champion_rmse(
+    champion_version
+):
+
+    version = (
+        client.get_model_version(
+            MODEL_NAME,
+            champion_version
+        )
+    )
+
+    run_id = version.run_id
+
+    run = mlflow.get_run(
+        run_id
+    )
+
+    return run.data.metrics[
+        "rmse"
+    ]
+
+
+
+def compare_and_decide_promotion(
+    candidate_metrics
+):
+
+    champion = get_current_champion()
+
+    # Primer modelo
+
+    if champion is None:
+
+        return {
+            "promote": True,
+            "reason": (
+                "No Champion model found. "
+                "First model automatically promoted."
+            ),
+            "champion_rmse": None,
+            "candidate_rmse": candidate_metrics["rmse"],
+            "improvement_pct": None
+        }
+
+    champion_rmse = champion["rmse"]
+    candidate_rmse = candidate_metrics["rmse"]
+
+    # Protección por si champion no tiene rmse
+
+    if champion_rmse is None:
+
+        return {
+            "promote": True,
+            "reason": (
+                "Champion model exists but "
+                "RMSE metric was not found. "
+                "Candidate promoted."
+            ),
+            "champion_rmse": None,
+            "candidate_rmse": candidate_rmse,
+            "improvement_pct": None
+        }
+
+    improvement = (
+        (champion_rmse - candidate_rmse)
+        / champion_rmse
+    )
+
+    promote = (
+        candidate_rmse < champion_rmse
+    )
+
+    if promote:
+
+        reason = (
+            f"Promotion approved. "
+            f"Candidate RMSE={candidate_rmse:.4f} "
+            f"improves Champion RMSE={champion_rmse:.4f}. "
+            f"Relative improvement={improvement:.2%}."
         )
 
     else:
 
-        print(
-            "⚠️ Muy pocos ejemplos por clase. "
-            "Split sin estratificación."
+        reason = (
+            f"Promotion rejected. "
+            f"Candidate RMSE={candidate_rmse:.4f} "
+            f"is not better than Champion RMSE={champion_rmse:.4f}. "
+            f"Relative improvement={improvement:.2%}."
         )
-
-        train_df, temp_df = train_test_split(
-            df,
-            test_size=(1 - TRAIN_SIZE),
-            random_state=42
-        )
-
-        val_df, test_df = train_test_split(
-            temp_df,
-            test_size=0.5,
-            random_state=42
-        )
-
-    # --------------------------------------------------------
-    # ASIGNAR LABELS
-    # --------------------------------------------------------
-    train_df["dataset_split"] = "train"
-
-    val_df["dataset_split"] = "validation"
-
-    test_df["dataset_split"] = "test"
-
-    # --------------------------------------------------------
-    # CONCATENAR
-    # --------------------------------------------------------
-    final_df = pd.concat([
-        train_df,
-        val_df,
-        test_df
-    ])
-
-    print("\n✅ Split completado")
-    print(
-        final_df["dataset_split"]
-        .value_counts()
-    )
-
-    return final_df
-
-
-def create_clean_table(
-    engine,
-    sample_df,
-    drop_if_exists=True
-):
-    """
-    Crea la tabla CLEAN_DATA.
-
-    Parameters
-    ----------
-    engine : sqlalchemy.Engine
-        Conexión a MySQL.
-
-    sample_df : pd.DataFrame
-        DataFrame ejemplo para inferir columnas.
-
-    drop_if_exists : bool
-        Si True elimina la tabla antes de crearla.
-    """
-
-    # ======================================================
-    # COPIA SEGURA
-    # ======================================================
-
-    df = sample_df.copy()
-
-    # ======================================================
-    # ELIMINAR COLUMNAS TÉCNICAS DUPLICADAS
-    # ======================================================
-
-    forbidden_columns = {
-        "id"
-    }
-
-    valid_columns = [
-        col for col in df.columns
-        if col.lower() not in forbidden_columns
-    ]
-
-    df = df[valid_columns]
-
-    # ======================================================
-    # CREAR TABLA
-    # ======================================================
-
-    with engine.begin() as conn:
-
-        # --------------------------------------------------
-        # DROP TABLE
-        # --------------------------------------------------
-
-        if drop_if_exists:
-            conn.execute(
-                text(
-                    f"DROP TABLE IF EXISTS {CLEAN_TABLE}"
-                )
-            )
-
-        # --------------------------------------------------
-        # VALIDAR SI EXISTE
-        # --------------------------------------------------
-
-        table_exists = conn.execute(
-            text(f"""
-                SELECT COUNT(*)
-                FROM information_schema.tables
-                WHERE table_schema = DATABASE()
-                AND table_name = '{CLEAN_TABLE}'
-            """)
-        ).scalar()
-
-        if table_exists:
-            print("ℹ️ Tabla CLEAN ya existe")
-            return
-
-        # --------------------------------------------------
-        # SQL COLUMNAS
-        # --------------------------------------------------
-
-        sql_columns = []
-
-        for col in df.columns:
-
-            dtype = str(df[col].dtype).lower()
-
-            if "int" in dtype:
-                sql_type = "BIGINT"
-
-            elif "float" in dtype:
-                sql_type = "DOUBLE"
-
-            elif "datetime" in dtype:
-                sql_type = "DATETIME"
-
-            else:
-                sql_type = "TEXT"
-
-            sql_columns.append(
-                f"`{col}` {sql_type}"
-            )
-
-        columns_sql = ",\n".join(sql_columns)
-
-        # --------------------------------------------------
-        # CREATE SQL
-        # --------------------------------------------------
-
-        create_sql = f"""
-        CREATE TABLE {CLEAN_TABLE} (
-
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,
-
-            {columns_sql},
-
-            UNIQUE (`encounter_id`)
-        )
-        """
-
-        conn.execute(
-            text(create_sql)
-        )
-
-    print("✅ Tabla CLEAN creada")
-
-
-# ============================================================
-# 💾 INSERTAR CLEAN DATA
-# ============================================================
-
-def insert_clean_data(
-    engine,
-    clean_df
-):
-    """
-    Inserta datos en CLEAN_DATA.
-    """
-
-    df = clean_df.copy()
-
-    # ======================================================
-    # ELIMINAR ID TÉCNICO
-    # ======================================================
-
-    df = df.drop(
-        columns=["id"],
-        errors="ignore"
-    )
-
-    # ======================================================
-    # INSERT
-    # ======================================================
-
-    df.to_sql(
-        CLEAN_TABLE,
-        con=engine,
-        if_exists="append",
-        index=False
-    )
-
-    print(
-        f"✅ {len(df)} registros insertados en CLEAN"
-    )
-
-
-# ============================================================
-# 📦 CARGA INCREMENTAL RAW
-# ============================================================
-
-def insert_raw_incremental(
-    engine: Engine,
-    df: pd.DataFrame,
-    source: str = "api"
-):
-    """
-    Inserta registros nuevos en la tabla RAW.
-
-    Los duplicados se controlan mediante encounter_id.
-
-    Parameters
-    ----------
-    engine : Engine
-        Engine SQLAlchemy.
-
-    df : pd.DataFrame
-        Datos a insertar.
-
-    source : str
-        Origen de los datos.
-    """
-
-    if df.empty:
-        print("⚠️ DataFrame vacío")
-        return
-
-    load_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-    df["load_id"] = load_id
-    df["load_timestamp"] = datetime.now()
-    df["source"] = source
-    df["record_status"] = "RAW"
-
-    existing_ids_query = f"""
-    SELECT encounter_id
-    FROM {RAW_TABLE}
-    """
-
-    existing_df = pd.read_sql(
-        existing_ids_query,
-        engine
-    )
-
-    existing_ids = set(existing_df["encounter_id"].tolist())
-
-    df = df[
-        ~df["encounter_id"].isin(existing_ids)
-    ]
-
-    if df.empty:
-        print("⚠️ No hay nuevos registros")
-        return
-
-    df.to_sql(
-        RAW_TABLE,
-        engine,
-        if_exists="append",
-        index=False
-    )
-
-    print(f"✅ Insertados {len(df)} registros RAW")
-
-
-def task_validate_source():
-    validate_api_health()
-    return True
-
-def task_ingest_raw():
-    engine = create_engine_connection()
-
-    df = fetch_batch(BATCH_SIZE)
-    df = normalize_column_names(df)
-
-    validate_raw_data(df)
-
-    create_raw_table(engine, df, drop_if_exists=False)
-    insert_raw_incremental(engine, df)
-
-    return len(df)
-
-def task_validate_raw():
-    engine = create_engine_connection()
-
-    df = pd.read_sql(f"SELECT * FROM {RAW_TABLE}", engine)
-
-    validate_raw_data(df)
 
     return {
-        "rows": len(df),
-        "duplicates": int(df["encounter_id"].duplicated().sum())
+        "promote": promote,
+        "reason": reason,
+        "champion_rmse": champion_rmse,
+        "candidate_rmse": candidate_rmse,
+        "improvement_pct": improvement
     }
 
-def task_preprocess():
-    engine = create_engine_connection()
 
-    raw_df = pd.read_sql(f"SELECT * FROM {RAW_TABLE}", engine)
+def promote_model(
+    version,
+    candidate_metrics,
+    promotion
+):
 
-    clean_df = preprocess_data(raw_df)
+    client.set_registered_model_alias(
+        MODEL_NAME,
+        "champion",
+        version
+    )
 
-    return len(clean_df)
+    current_batch = pd.read_sql(
+        """
+        SELECT MAX(batch_number)
+        AS batch_number
+        FROM clean_data
+        """,
+        ENGINE
+    ).iloc[0, 0]
 
-def task_store_clean():
-    engine = create_engine_connection()
+    with ENGINE.begin() as conn:
 
-    raw_df = pd.read_sql(f"SELECT * FROM {RAW_TABLE}", engine)
+        conn.execute(
+            text(
+                """
+                UPDATE batch_statistics
+                SET used_for_training = TRUE
+                WHERE used_for_training = FALSE
+                """
+            )
+        )
 
-    clean_df = preprocess_data(raw_df)
+    training_run = pd.DataFrame([{
 
-    create_clean_table(engine, clean_df, drop_if_exists=True)
-    insert_clean_data(engine, clean_df)
+        "triggering_batch":
+            current_batch,
 
-    return len(clean_df)
+        "mlflow_run_id":
+            candidate_metrics["run_id"],
 
-def task_split_data():
-    engine = create_engine_connection()
+        "candidate_rmse":
+            candidate_metrics["rmse"],
 
-    df = pd.read_sql(f"SELECT * FROM {CLEAN_TABLE}", engine)
+        "candidate_mae":
+            candidate_metrics["mae"],
 
-    df = assign_dataset_split(df)
+        "candidate_r2":
+            candidate_metrics["r2"],
 
-    # mejor práctica: guardar en misma tabla o tabla separada
-    df.to_sql(
-        "dataset_split",
-        engine,
-        if_exists="replace",
+        "promoted":
+            True,
+
+        "created_at":
+            pd.Timestamp.now()
+    }])
+
+    training_run.to_sql(
+
+        "training_runs",
+
+        ENGINE,
+
+        if_exists="append",
+
         index=False
     )
 
-    return df["dataset_split"].value_counts().to_dict()
+    improvement = promotion["improvement_pct"]
+    if improvement is None:
+        improvement_text = "N/A"
+    else:
+        improvement_text = f"{improvement:.2%}"
 
+    append_pipeline_log(
+f"""
+PROMOTION DECISION
 
-def create_db_connection():
-    """
-    Creates a SQLAlchemy connection to MySQL.
-    """
+Decision:
+PROMOTE
 
-    connection_uri = (
-        f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}"
-        f"@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}"
+Reason:
+{promotion['reason']}
+
+Champion RMSE:
+{promotion['champion_rmse']}
+
+Candidate RMSE:
+{promotion['candidate_rmse']}
+
+Improvement:
+{improvement_text}
+
+Version:
+{version}
+"""
     )
 
-    return create_engine(connection_uri)
-
-
-def ensure_minio_bucket():
-    """
-    Creates the MinIO bucket if it does not exist.
-    """
-
-    client = Minio(
-        MINIO_ENDPOINT,
-        access_key=MINIO_ACCESS_KEY,
-        secret_key=MINIO_SECRET_KEY,
-        secure=False
-    )
-
-    if not client.bucket_exists(MINIO_BUCKET):
-        client.make_bucket(MINIO_BUCKET)
-
-    print(f"Bucket '{MINIO_BUCKET}' ready.")
-
-
-def load_clean_data():
-    """
-    Loads clean processed data from MySQL.
-    """
-
-    engine = create_db_connection()
-
-    query = f"""
-    SELECT *
-    FROM {SPLIT_TABLE}
-    """
-
-    df = pd.read_sql(query, engine)
-
-    return df
-
-
-def validate_dataset(df):
-    """
-    Validates dataset integrity before training.
-    """
-
-    if df.empty:
-        raise ValueError("Dataset is empty.")
-
-    if TARGET_COLUMN not in df.columns:
-        raise ValueError("Target column not found.")
-
-    if "dataset_split" not in df.columns:
-        raise ValueError("dataset_split column missing.")
-
-
-
-def split_dataset(df):
-    """
-    Splits dataset using dataset_split column.
-    """
-
-    train_df = df[df["dataset_split"] == "train"]
-    val_df = df[df["dataset_split"] == "validation"]
-    test_df = df[df["dataset_split"] == "test"]
-
-    return train_df, val_df, test_df
-
-
-
-# ============================================================
-# FEATURES A EXCLUIR DEL ENTRENAMIENTO
-# ============================================================
-
-DROP_COLUMNS = [
-
-    # ----------------------------------------
-    # TARGETS
-    # ----------------------------------------
-    "readmitted",
-    TARGET_COLUMN,
-
-    # ----------------------------------------
-    # SPLIT
-    # ----------------------------------------
-    "dataset_split",
-
-    # ----------------------------------------
-    # IDs TÉCNICOS
-    # ----------------------------------------
-    "id",
-    "encounter_id",
-    "patient_nbr",
-
-    # ----------------------------------------
-    # METADATA PIPELINE
-    # ----------------------------------------
-    "load_id",
-    "load_timestamp",
-    "source",
-    "record_status"
-]
-def prepare_features(df):
-    """
-    Prepares dataset for CatBoost training.
-    """
-
-    # ======================================================
-    # FEATURES / TARGET
-    # ======================================================
-
-    X = df.drop(
-        columns=DROP_COLUMNS,
-        errors="ignore"
-    ).copy()
-
-    y = df[TARGET_COLUMN].copy()
-
-    # ======================================================
-    # DETECTAR CATEGÓRICAS
-    # ======================================================
-
-    categorical_columns = (
-        X.select_dtypes(
-            include=["object", "category"]
-        )
-        .columns
-        .tolist()
+    print(
+        f"Champion updated -> {version}"
     )
 
 
-    FORCE_CATEGORICAL_COLUMNS = [
-    "diag_1",
-    "diag_2",
-    "diag_3",
-    "admission_type_id",
-    "discharge_disposition_id",
-    "admission_source_id"
+def reject_model(
+    candidate_metrics,
+    promotion
+):
+
+    current_batch = pd.read_sql(
+        """
+        SELECT MAX(batch_number)
+        AS batch_number
+        FROM clean_data
+        """,
+        ENGINE
+    ).iloc[0, 0]
+
+    training_run = pd.DataFrame([{
+
+        "triggering_batch":
+            current_batch,
+
+        "mlflow_run_id":
+            candidate_metrics["run_id"],
+
+        "candidate_rmse":
+            candidate_metrics["rmse"],
+
+        "candidate_mae":
+            candidate_metrics["mae"],
+
+        "candidate_r2":
+            candidate_metrics["r2"],
+
+        "promoted":
+            False,
+
+        "created_at":
+            pd.Timestamp.now()
+    }])
+
+    training_run.to_sql(
+
+        "training_runs",
+
+        ENGINE,
+
+        if_exists="append",
+
+        index=False
+    )
+
+    append_pipeline_log(
+f"""
+PROMOTION DECISION
+
+Decision:
+REJECT
+
+Reason:
+{promotion['reason']}
+
+Champion RMSE:
+{promotion['champion_rmse']}
+
+Candidate RMSE:
+{promotion['candidate_rmse']}
+
+Improvement:
+{promotion['improvement_pct']:.2%}
+"""
+)
+
+    print(
+        "Candidate rejected"
+    )
+
+
+def end_pipeline():
+
+    append_pipeline_log(
+        "Pipeline finished successfully"
+    )
+
+    print(
+        "=" * 80
+    )
+
+    print(
+        "PIPELINE FINISHED"
+    )
+
+    print(
+        "=" * 80
+    )
+
+
+def simulate_training_dag():
+    print("Tracking URI:")
+    print(mlflow.get_tracking_uri())
+
+    print(
+        "\nSTART TRAINING DAG\n"
+    )
+
+    decision = decide_training()
+
+    if not decision["should_train"]:
     
-    ]
-
+        skip_training(
+            decision
+        )
     
-    # ======================================================
-    # LIMPIAR CATEGÓRICAS
-    # ======================================================
-
-    for col in categorical_columns:
-
-        X[col] = (
-            X[col]
-            .astype(str)
-            .replace(
-                {
-                    "None": "missing",
-                    "nan": "missing",
-                    "NaN": "missing",
-                    "<NA>": "missing",
-                    "?": "missing"
-                }
-            )
-        )
-
-    for col in FORCE_CATEGORICAL_COLUMNS:
-
-        if col in X.columns:
+        end_pipeline()
     
-            X[col] = (
-                X[col]
-                .astype(str)
-                .replace(
-                    {
-                        "nan": "missing",
-                        "None": "missing"
-                    }
-                )
-            )
-
-    # ======================================================
-    # LIMPIAR NUMÉRICAS
-    # ======================================================
-
-    numeric_columns = [
-        col for col in X.columns
-        if col not in categorical_columns
-    ]
-
-    for col in numeric_columns:
-
-        X[col] = pd.to_numeric(
-            X[col],
-            errors="coerce"
-        )
-
-    # ======================================================
-    # ELIMINAR COLUMNAS TOTALMENTE VACÍAS
-    # ======================================================
-
-    empty_columns = [
-        col for col in X.columns
-        if X[col].isna().all()
-    ]
-
-    if empty_columns:
-
-        print(
-            f"⚠️ Eliminando columnas vacías: "
-            f"{empty_columns}"
-        )
-
-        X = X.drop(columns=empty_columns)
-
-    # ======================================================
-    # INFO DEBUG
-    # ======================================================
-
-    print("\n📊 Dataset preparado")
-    print(f"Features: {X.shape[1]}")
-    print(f"Rows: {X.shape[0]}")
-
-    return X, y
-
-
-def extract_feature_metadata(X):
-    """
-    Extracts feature metadata for inference validation,
-    frontend generation and schema inspection.
-    """
-
-    metadata = {}
-
-    for col in X.columns:
-
-        # ==================================================
-        # CATEGORICAL
-        # ==================================================
-
-        if (
-            X[col].dtype == "object"
-            or str(X[col].dtype) == "category"
-        ):
-
-            values = (
-                X[col]
-                .dropna()
-                .astype(str)
-                .unique()
-                .tolist()
-            )
-
-            metadata[col] = {
-                "type": "categorical",
-                "values": sorted(values)
-            }
-
-        # ==================================================
-        # NUMERIC
-        # ==================================================
-
-        else:
-
-            numeric_series = pd.to_numeric(
-                X[col],
-                errors="coerce"
-            )
-
-            metadata[col] = {
-                "type": "numeric",
-                "min": float(numeric_series.min())
-                if not numeric_series.isna().all()
-                else None,
-
-                "max": float(numeric_series.max())
-                if not numeric_series.isna().all()
-                else None
-            }
-
-    return metadata
-
-
-def train_catboost_model(
-    X_train,
-    y_train,
-    X_val,
-    y_val
-):
-    """
-    Trains a CatBoost classifier.
-    """
-
-    categorical_features = (
-        X_train.select_dtypes(include=["object", "category"])
-        .columns
-        .tolist()
-    )
-
-    model = CatBoostClassifier(
-        iterations=300,
-        learning_rate=0.1,
-        depth=10,
-        eval_metric="F1",
-        loss_function="Logloss",
-        verbose=100
-    )
-
-    model.fit(
-        X_train,
-        y_train,
-        cat_features=categorical_features,
-        eval_set=(X_val, y_val)
-    )
-
-    return model
-
-
-from tempfile import NamedTemporaryFile
-from minio import Minio
-import json
-import os
-
-def save_feature_metadata_to_minio(
-    feature_metadata,
-    object_prefix="training"
-):
-    """
-    Saves feature metadata to MinIO.
-    """
-
-    client = Minio(
-        MINIO_ENDPOINT,
-        access_key=MINIO_ACCESS_KEY,
-        secret_key=MINIO_SECRET_KEY,
-        secure=False
-    )
-
-    # ==================================================
-    # CREATE TEMP FILE
-    # ==================================================
-
-    tmp_file = NamedTemporaryFile(
-        suffix=".json",
-        mode="w",
-        delete=False
-    )
-
-    try:
-
-        json.dump(
-            feature_metadata,
-            tmp_file,
-            indent=2
-        )
-
-        tmp_file.flush()
-        tmp_file.close()
-
-        client.fput_object(
-            MINIO_BUCKET,
-            f"{object_prefix}/feature_metadata.json",
-            tmp_file.name
-        )
-
-    finally:
-
-        if os.path.exists(tmp_file.name):
-            os.remove(tmp_file.name)
-
-    print("✅ Feature metadata saved")
-
-
-
-def evaluate_model(model, X_test, y_test):
-    """
-    Evaluates the trained model.
-    """
-
-    predictions = model.predict(X_test)
-    probabilities = model.predict_proba(X_test)[:, 1]
-
-    metrics = {
-        "accuracy": accuracy_score(y_test, predictions),
-        "precision": precision_score(y_test, predictions),
-        "recall": recall_score(y_test, predictions),
-        "f1_score": f1_score(y_test, predictions),
-        "roc_auc": roc_auc_score(y_test, probabilities)
-    }
-
-    return metrics
-
-
-def load_feature_metadata_from_minio(
-    object_prefix="training"
-):
-    """
-    Loads feature metadata from MinIO.
-    """
-
-    client = Minio(
-        MINIO_ENDPOINT,
-        access_key=MINIO_ACCESS_KEY,
-        secret_key=MINIO_SECRET_KEY,
-        secure=False
-    )
-
-    metadata_path = "/tmp/feature_metadata.json"
-
-    client.fget_object(
-        MINIO_BUCKET,
-        f"{object_prefix}/feature_metadata.json",
-        metadata_path
-    )
-
-    with open(metadata_path, "r") as f:
-
-        metadata = json.load(f)
-
-    return metadata
-
-
-def setup_mlflow():
-    """
-    Configures MLflow tracking.
-    """
-
-    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-    mlflow.set_experiment(MLFLOW_EXPERIMENT)
-
-
-def register_model(
-    model,
-    metrics,
-    params,
-    X_example,
-    feature_metadata
-):
-    """
-    Logs model and metadata into MLflow.
-    """
-
-    with mlflow.start_run():
-
-        mlflow.log_params(params)
-
-        mlflow.log_metrics(metrics)
-
-        # ==================================================
-        # SIGNATURE
-        # ==================================================
-
-        predictions = model.predict(X_example)
-
-        signature = infer_signature(
-            X_example,
-            predictions
-        )
-
-        # ==================================================
-        # SAVE FEATURE METADATA
-        # ==================================================
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-        
-            metadata_path = os.path.join(
-                tmp_dir,
-                "feature_metadata.json"
-            )
-        
-            with open(metadata_path, "w") as f:
-        
-                json.dump(
-                    feature_metadata,
-                    f,
-                    indent=2
-                )
-        
-            mlflow.log_artifact(
-                metadata_path,
-                artifact_path="metadata"
-            )
-
-        # ==================================================
-        # LOG MODEL
-        # ==================================================
-
-        mlflow.catboost.log_model(
-            cb_model=model,
-            artifact_path="model",
-            registered_model_name="diabetes_catboost_model",
-            signature=signature,
-            input_example=X_example.head(3)
-        )
-
-
-def compare_and_promote_model(
-    current_f1
-):
-    """
-    Promotes the best model to champion alias.
-    """
-
-    client = MlflowClient()
-
-    model_name = "diabetes_catboost_model"
-
-    latest_versions = client.search_model_versions(
-        f"name='{model_name}'"
-    )
-
-    best_version = None
-    best_score = -1
-
-    for version in latest_versions:
-
-        run_id = version.run_id
-
-        run = client.get_run(run_id)
-
-        score = run.data.metrics.get("f1_score", 0)
-
-        if score > best_score:
-            best_score = score
-            best_version = version.version
-
-    if best_version:
-
-        client.set_registered_model_alias(
-            model_name,
-            "champion",
-            best_version
-        )
-
-        print(
-            f"Model version {best_version} promoted "
-            f"with F1-score={best_score:.4f}"
-        )
-
-
-
-def debug_catboost_columns(X):
-    """
-    Detect problematic columns for CatBoost.
-    """
-
-    print("\n===== DEBUGGING COLUMNS =====\n")
-
-    for col in X.columns:
-
-        dtype = X[col].dtype
-
-        print(f"\nCOLUMN: {col}")
-        print(f"DTYPE: {dtype}")
-
-        try:
-            sample_values = X[col].dropna().head(10).tolist()
-
-            print("SAMPLE VALUES:")
-            print(sample_values)
-
-            print("PYTHON TYPES:")
-            print(
-                X[col]
-                .dropna()
-                .head(10)
-                .apply(type)
-                .tolist()
-            )
-
-        except Exception as e:
-            print(f"ERROR INSPECTING COLUMN: {e}")
-
-
-
-from tempfile import NamedTemporaryFile
-from minio import Minio
-import json
-import os
-
-def save_model_to_minio(
-    model,
-    metrics,
-    raw_example_df,
-    object_prefix="training"
-):
-    """
-    Saves model, metrics and schema example to MinIO.
-    """
-
-    client = Minio(
-        MINIO_ENDPOINT,
-        access_key=MINIO_ACCESS_KEY,
-        secret_key=MINIO_SECRET_KEY,
-        secure=False
-    )
-
-    # ==================================================
-    # SAVE MODEL
-    # ==================================================
-
-    tmp_model = NamedTemporaryFile(
-        suffix=".cbm",
-        delete=False
-    )
-
-    tmp_model.close()
-
-    try:
-
-        model.save_model(tmp_model.name)
-
-        client.fput_object(
-            MINIO_BUCKET,
-            f"{object_prefix}/model.cbm",
-            tmp_model.name
-        )
-
-    finally:
-
-        if os.path.exists(tmp_model.name):
-            os.remove(tmp_model.name)
-
-    # ==================================================
-    # SAVE METRICS
-    # ==================================================
-
-    tmp_metrics = NamedTemporaryFile(
-        suffix=".json",
-        mode="w",
-        delete=False
-    )
-
-    try:
-
-        json.dump(metrics, tmp_metrics)
-
-        tmp_metrics.flush()
-        tmp_metrics.close()
-
-        client.fput_object(
-            MINIO_BUCKET,
-            f"{object_prefix}/metrics.json",
-            tmp_metrics.name
-        )
-
-    finally:
-
-        if os.path.exists(tmp_metrics.name):
-            os.remove(tmp_metrics.name)
-
-    # ==================================================
-    # SAVE RAW INPUT EXAMPLE
-    # ==================================================
-
-    tmp_input = NamedTemporaryFile(
-        suffix=".parquet",
-        delete=False
-    )
-
-    tmp_input.close()
-
-    try:
-
-        raw_example_df.to_parquet(
-            tmp_input.name,
-            index=False
-        )
-
-        client.fput_object(
-            MINIO_BUCKET,
-            f"{object_prefix}/input_example.parquet",
-            tmp_input.name
-        )
-
-    finally:
-
-        if os.path.exists(tmp_input.name):
-            os.remove(tmp_input.name)
-
-    print("✅ Model, metrics and schema saved")
-
-
-def load_model_from_minio(
-    object_prefix="training"
-):
-    """
-    Loads model, metrics and schema example from MinIO.
-    """
-
-    client = Minio(
-        MINIO_ENDPOINT,
-        access_key=MINIO_ACCESS_KEY,
-        secret_key=MINIO_SECRET_KEY,
-        secure=False
-    )
-
-    # ==================================================
-    # MODEL
-    # ==================================================
-
-    model_path = "/tmp/model.cbm"
-
-    client.fget_object(
-        MINIO_BUCKET,
-        f"{object_prefix}/model.cbm",
-        model_path
-    )
-
-    model = CatBoostClassifier()
-
-    model.load_model(model_path)
-
-    # ==================================================
-    # METRICS
-    # ==================================================
-
-    metrics_path = "/tmp/metrics.json"
-
-    client.fget_object(
-        MINIO_BUCKET,
-        f"{object_prefix}/metrics.json",
-        metrics_path
-    )
-
-    with open(metrics_path, "r") as f:
-        metrics = json.load(f)
-
-    # ==================================================
-    # RAW INPUT EXAMPLE
-    # ==================================================
-
-    example_path = "/tmp/input_example.parquet"
-
-    client.fget_object(
-        MINIO_BUCKET,
-        f"{object_prefix}/input_example.parquet",
-        example_path
-    )
-
-    raw_example_df = pd.read_parquet(
-        example_path
-    )
-
-    # IMPORTANT:
-    # Reapply preprocessing
-    X_example, _ = prepare_features(
-        raw_example_df
-    )
-
-    return model, metrics, X_example
-
-
-def task_train_model():
-    """
-    DAG Task:
-    Train model and persist artifacts.
-    """
-
-    print("\n===== TASK 7: TRAIN MODEL =====")
-
-    df = load_clean_data()
-
-    validate_dataset(df)
-
-    train_df, val_df, test_df = split_dataset(df)
-
-    X_train, y_train = prepare_features(train_df)
-    X_val, y_val = prepare_features(val_df)
-    X_test, y_test = prepare_features(test_df)
-
-    # ==================================================
-    # FEATURE METADATA
-    # ==================================================
-
-    feature_metadata = extract_feature_metadata(
-        X_train
-    )
-
-    # ==================================================
-    # TRAIN MODEL
-    # ==================================================
-
-    model = train_catboost_model(
-        X_train,
-        y_train,
-        X_val,
-        y_val
-    )
-
-    metrics = evaluate_model(
-        model,
-        X_test,
-        y_test
-    )
-
-    # ==================================================
-    # SAVE MODEL
-    # ==================================================
-
-    save_model_to_minio(
-        model,
-        metrics,
-        train_df.head(50)
-    )
-
-    # ==================================================
-    # SAVE FEATURE METADATA
-    # ==================================================
-
-    save_feature_metadata_to_minio(
-        feature_metadata
-    )
-
-    print(metrics)
-
-
-def task_register_model():
-    """
-    DAG Task:
-    Register trained model into MLflow.
-    """
-
-    print("\n===== TASK 8: REGISTER MODEL =====")
-
-    setup_mlflow()
-
-    model, metrics, X_example = load_model_from_minio()
-
-    feature_metadata = (
-        load_feature_metadata_from_minio()
-    )
-
-    params = model.get_params()
-
-    register_model(
-        model,
-        metrics,
-        params,
-        X_example,
-        feature_metadata
-    )
-
-    print("✅ Model registered in MLflow")
-
-
-
-def task_compare_and_promote():
-    """
-    DAG Task:
-    Compare models and promote best version.
-    """
-
-    print("\n===== TASK 9-10: COMPARE AND PROMOTE =====")
+        return
     
-    setup_mlflow()
-
-    client = MlflowClient()
-
-    model_name = "diabetes_catboost_model"
-
-    versions = client.search_model_versions(
-        f"name='{model_name}'"
+    append_pipeline_log(
+        "\n".join(
+            [
+                "TRAINING DECISION",
+                "",
+                "Result:",
+                "TRAIN",
+                "",
+                "Reasons:",
+                *[
+                    f"- {r}"
+                    for r in decision["reasons"]
+                ]
+            ]
+        )
     )
 
-    best_version = None
-    best_score = -1
-
-    for version in versions:
-
-        run = client.get_run(version.run_id)
-
-        score = run.data.metrics.get(
-            "f1_score",
-            0
+    ensure_minio_buckets()
+    
+    candidate_metrics = (
+        train_evaluate_register_candidate()
+    )
+    
+    version = register_candidate_model(
+        candidate_metrics
+    )
+    
+    promotion = (
+        compare_and_decide_promotion(
+            candidate_metrics
         )
-
-        print(
-            f"Version={version.version} "
-            f"F1={score}"
+    )
+    
+    if promotion["promote"]:
+    
+        promote_model(
+            version,
+            candidate_metrics,
+            promotion
         )
-
-        if score > best_score:
-
-            best_score = score
-            best_version = version.version
-
-    if best_version:
-
-        client.set_registered_model_alias(
-            model_name,
-            "champion",
-            best_version
+    
+    else:
+    
+        reject_model(
+            candidate_metrics,
+            promotion
         )
-
-        print(
-            f"\n🏆 Champion updated "
-            f"-> version {best_version}"
-        )
-
-
-def run_pipeline():
-    """
-    Executes the complete training pipeline.
-    """
-
-    try:
-
-        print("Starting training pipeline...")
-
-        ensure_minio_bucket()
-
-        setup_mlflow()
-
-        df = load_clean_data()
-
-        validate_dataset(df)
-
-        train_df, val_df, test_df = split_dataset(df)
-
-        X_train, y_train = prepare_features(train_df)
-        X_val, y_val = prepare_features(val_df)
-        X_test, y_test = prepare_features(test_df)
-        
-        #debug_catboost_columns(X_train)
-        
-        model = train_catboost_model(
-                X_train,
-                y_train,
-                X_val,
-                y_val
-        )
-
-        metrics = evaluate_model(
-            model,
-            X_test,
-            y_test
-        )
-
-        params = model.get_params()
-
-        register_model(
-            model,
-            metrics,
-            params
-        )
-
-        compare_and_promote_model(
-            metrics["f1_score"]
-        )
-
-        print("Pipeline completed successfully.")
-
-        return metrics
-
-    except Exception as error:
-
-        print(f"Pipeline failed: {error}")
-
-        raise
-
-
+    
+    end_pipeline()

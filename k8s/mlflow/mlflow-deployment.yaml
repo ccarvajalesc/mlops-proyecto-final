@@ -26,7 +26,7 @@ spec:
                 name: mlops-config
             - secretRef:
                 name: mlops-secrets
-          image: karabaharesu/mlops-final-mlflow:26
+          image: karabaharesu/mlops-final-mlflow:27
           livenessProbe:
             exec:
               command:

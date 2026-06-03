@@ -470,26 +470,26 @@ services:
     networks:
       - mlops_net
 
-#  streamlit-ui:
-#    build:
-#      context: ./streamlit_ui
-#      dockerfile: Dockerfile.streamlit_ui
-#
-#    container_name: diabetes-streamlit-ui
-#
-#    ports:
-#      - "8501:8501"
-#
-#    env_file:
-#      - .env
-#      - .sec_config
-#
-#    depends_on:
-#      - api-inference
-#
-#    networks:
-#      - mlops_net
-#
+  streamlit-ui:
+    build:
+      context: ./streamlit_ui
+      dockerfile: Dockerfile.streamlit_ui
+
+    container_name: diabetes-streamlit-ui
+
+    ports:
+      - "8501:8501"
+
+    env_file:
+      - .env
+      - .sec_config
+
+    depends_on:
+      - api-inference
+
+    networks:
+      - mlops_net
+
   node-exporter:
     image: prom/node-exporter
     container_name: node-exporter

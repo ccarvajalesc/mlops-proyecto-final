@@ -1,46 +1,47 @@
 # ============================================================
-# 📦 IMPORTS
+# IMPORTS
 # ============================================================
 
-import json
+import os
 import random
 import requests
 import streamlit as st
-import os
+
 
 # ============================================================
-# ⚙️ CONFIG
+# CONFIG
 # ============================================================
 
-API_URL = os.environ.get("API_URL", "http://api-inference:8000")
+API_URL = os.getenv(
+    "API_URL",
+    "http://api-inference:8001"
+)
 
 # ============================================================
-# PAGE CONFIG
+# PAGE
 # ============================================================
 
 st.set_page_config(
-    page_title="Diabetes Readmission",
+    page_title="Real Estate Price Predictor",
     layout="wide"
 )
 
 st.title(
-    "🏥 Diabetes Readmission Predictor"
+    "🏠 Real Estate Price Predictor"
 )
 
 # ============================================================
-# LOAD HEALTH
+# HEALTH
 # ============================================================
 
 try:
 
-    health_response = requests.get(
+    health = requests.get(
         f"{API_URL}/health",
         timeout=5
-    )
+    ).json()
 
-    health_data = health_response.json()
-
-except Exception as e:
+except Exception:
 
     st.error(
         "❌ Could not connect to API"
@@ -48,101 +49,80 @@ except Exception as e:
 
     st.stop()
 
-# ============================================================
-# API DOWN
-# ============================================================
-
-if not health_data["model_loaded"]:
+if health["status"] != "ok":
 
     st.warning(
-        "⚠️ No champion model loaded yet"
+        "⚠️ No model loaded"
     )
 
     st.stop()
 
 # ============================================================
+# METADATA
+# ============================================================
+
+metadata = requests.get(
+    f"{API_URL}/metadata",
+    timeout=10
+).json()
+
+feature_metadata = metadata["metadata"]
+
+allowed_categories = (
+    feature_metadata[
+        "allowed_categories"
+    ]
+)
+
+numeric_ranges = (
+    feature_metadata[
+        "numeric_ranges"
+    ]
+)
+
+# ============================================================
 # MODEL INFO
 # ============================================================
 
-model_info = requests.get(
-    f"{API_URL}/model-info"
-).json()
-
 st.success(
     f"""
-    Model: {model_info["model_name"]}
+    Model: real_estate_price_model
 
-    Version: {model_info["model_version"]}
-
-    Alias: {model_info["model_alias"]}
+    Version: {metadata["version"]}
     """
 )
 
 # ============================================================
-# LOAD FEATURE METADATA
+# RANDOM PAYLOAD
 # ============================================================
 
-metadata_response = requests.get(
-    f"{API_URL}/feature-metadata"
-)
-
-metadata = metadata_response.json()
-
-features = metadata["features"]
-
-# ============================================================
-# EXAMPLE BUTTON
-# ============================================================
-
-if "example_payload" not in st.session_state:
+if (
+    "example_payload"
+    not in st.session_state
+):
 
     st.session_state.example_payload = {}
 
-def generate_example_payload():
+def load_random_payload():
 
-    payload = {}
+    try:
 
-    for feature_name, feature_meta in (
-        features.items()
-    ):
+        sample = requests.get(
+            f"{API_URL}/sample",
+            timeout=10
+        ).json()
 
-        # ----------------------------------------------------
-        # CATEGORICAL
-        # ----------------------------------------------------
+        st.session_state.example_payload = (
+            sample["payload"]
+        )
 
-        if feature_meta["type"] == "categorical":
+    except Exception as e:
 
-            payload[feature_name] = random.choice(
-                feature_meta["values"]
-            )
-
-        # ----------------------------------------------------
-        # NUMERIC
-        # ----------------------------------------------------
-
-        else:
-
-            min_value = feature_meta["min"]
-            max_value = feature_meta["max"]
-
-            if (
-                min_value is None
-                or max_value is None
-            ):
-
-                payload[feature_name] = 0
-
-            else:
-
-                payload[feature_name] = (
-                    (min_value + max_value) / 2
-                )
-
-    st.session_state.example_payload = payload
+        st.error(str(e))
 
 st.button(
-    "🎲 Load Example Values",
-    on_click=generate_example_payload
+    "🎲 Generate Example",
+    on_click=load_random_payload
 )
 
 # ============================================================
@@ -151,102 +131,104 @@ st.button(
 
 payload = {}
 
-with st.form("prediction_form"):
+with st.form("predict_form"):
 
     st.subheader(
-        "Patient Features"
+        "Property Features"
     )
 
-    columns = st.columns(3)
+    cols = st.columns(3)
 
-    feature_names = list(
-        features.keys()
+    all_features = (
+        list(
+            allowed_categories.keys()
+        )
+        +
+        list(
+            numeric_ranges.keys()
+        )
     )
 
-    for idx, feature_name in enumerate(
-        feature_names
+    for idx, feature in enumerate(
+        all_features
     ):
 
-        feature_meta = features[
-            feature_name
-        ]
-
-        default_value = (
+        default = (
             st.session_state
             .example_payload
-            .get(feature_name)
+            .get(feature)
         )
 
-        with columns[idx % 3]:
+        with cols[idx % 3]:
 
-            # ------------------------------------------------
+            # =====================================
             # CATEGORICAL
-            # ------------------------------------------------
+            # =====================================
 
-            if (
-                feature_meta["type"]
-                == "categorical"
-            ):
+            if feature in allowed_categories:
 
-                values = feature_meta["values"]
+                values = (
+                    allowed_categories[
+                        feature
+                    ]
+                )
 
-                if (
-                    default_value
-                    in values
-                ):
+                selected_index = 0
 
-                    default_index = values.index(
-                        default_value
+                if default in values:
+
+                    selected_index = (
+                        values.index(default)
                     )
 
-                else:
-
-                    default_index = 0
-
-                payload[feature_name] = (
+                payload[feature] = (
                     st.selectbox(
-                        feature_name,
+                        feature,
                         values,
-                        index=default_index
+                        index=selected_index
                     )
                 )
 
-            # ------------------------------------------------
+            # =====================================
             # NUMERIC
-            # ------------------------------------------------
+            # =====================================
 
             else:
 
-                min_value = feature_meta["min"]
-                max_value = feature_meta["max"]
+                limits = numeric_ranges[
+                    feature
+                ]
 
-                if min_value is None:
-                    min_value = 0.0
+                min_value = float(
+                    limits["min"]
+                )
 
-                if max_value is None:
-                    max_value = 100.0
+                max_value = float(
+                    limits["max"]
+                )
 
-                if default_value is None:
+                if default is None:
 
-                    default_value = (
-                        min_value + max_value
+                    default = (
+                        min_value
+                        + max_value
                     ) / 2
 
-                payload[feature_name] = (
+                payload[feature] = (
                     st.number_input(
-                        feature_name,
-                        value=float(default_value),
-                        min_value=float(min_value),
-                        max_value=float(max_value)
+                        feature,
+                        min_value=min_value,
+                        max_value=max_value,
+                        value=float(default)
                     )
                 )
 
     submitted = st.form_submit_button(
-        "🔮 Predict"
+        "🔮 Predict Price"
     )
 
 # ============================================================
-# PREDICT
+# PREDICTION
 # ============================================================
 
 if submitted:
@@ -263,19 +245,11 @@ if submitted:
                 timeout=30
             )
 
-            # ------------------------------------------------
-            # ERROR
-            # ------------------------------------------------
-
             if response.status_code != 200:
 
                 st.error(
                     response.text
                 )
-
-            # ------------------------------------------------
-            # SUCCESS
-            # ------------------------------------------------
 
             else:
 
@@ -290,23 +264,17 @@ if submitted:
                 with col1:
 
                     st.metric(
-                        "Prediction",
-                        result["prediction"]
-                    )
-
-                    st.metric(
-                        "Probability",
-                        round(
-                            result["probability"],
-                            4
-                        )
+                        "Estimated Price",
+                        f"${result['predicted_price']:,.2f}"
                     )
 
                 with col2:
 
                     st.metric(
                         "Model Version",
-                        result["model_version"]
+                        result[
+                            "model_version"
+                        ]
                     )
 
                     st.metric(
@@ -317,7 +285,13 @@ if submitted:
                     )
 
                 st.subheader(
-                    "Raw Response"
+                    "Request"
+                )
+
+                st.json(payload)
+
+                st.subheader(
+                    "Response"
                 )
 
                 st.json(result)

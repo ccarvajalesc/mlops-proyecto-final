@@ -10,7 +10,7 @@ MINIO_SECRET_KEY = os.getenv("MINIO_ROOT_PASSWORD")
 PIPELINE_BUCKET = "pipeline-logs"
 
 client = Minio(
-    f"http://{MINIO_ENDPOINT}",
+    MINIO_ENDPOINT,
     access_key=MINIO_ACCESS_KEY,
     secret_key=MINIO_SECRET_KEY,
     secure=False

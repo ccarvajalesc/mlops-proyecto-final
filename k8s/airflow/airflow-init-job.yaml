@@ -16,7 +16,7 @@ spec:
       containers:
         - name: airflow-init
 
-          image: karabaharesu/mlops-final-airflow:20
+          image: karabaharesu/mlops-final-airflow:21
 
           command:
             - /bin/bash

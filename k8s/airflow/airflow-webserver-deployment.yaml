@@ -21,7 +21,7 @@ spec:
       containers:
         - name: airflow-webserver
 
-          image: karabaharesu/mlops-final-airflow:19
+          image: karabaharesu/mlops-final-airflow:20
           imagePullPolicy: Always
 
           resources:

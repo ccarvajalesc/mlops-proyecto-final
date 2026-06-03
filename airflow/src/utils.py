@@ -1184,6 +1184,18 @@ def decide_training():
             ]
         }
 
+    for col in ["mean_value", "std_value"]:
+
+        training_stats[col] = pd.to_numeric(
+            training_stats[col],
+            errors="coerce"
+        )
+
+        current_stats[col] = pd.to_numeric(
+            current_stats[col],
+            errors="coerce"
+        )
+
     reasons.append(
         f"Current batch={current_batch}"
     )

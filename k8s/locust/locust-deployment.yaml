@@ -24,7 +24,7 @@ spec:
         - envFrom:
             - configMapRef:
                 name: mlops-config
-          image: karabaharesu/mlops-final-locust:21
+          image: karabaharesu/mlops-final-locust:22
           name: locust
           resources:
             requests:

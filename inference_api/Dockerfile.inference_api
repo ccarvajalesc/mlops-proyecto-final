@@ -6,7 +6,6 @@ COPY requirements_inference_api.txt /app/requirements.txt
 RUN pip install --no-cache-dir --upgrade -r /app/requirements.txt
 
 COPY main.py ./
-COPY predict.py ./
 
 RUN apt-get update && apt-get install -y curl   
 

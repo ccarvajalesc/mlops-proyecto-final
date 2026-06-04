@@ -27,7 +27,7 @@ st.set_page_config(
 )
 
 st.title(
-    "🏠 Real Estate Price Predictor"
+    "🏠 Real Estate Price Predictor (cambio)"
 )
 
 # ============================================================

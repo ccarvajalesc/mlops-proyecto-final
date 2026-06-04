@@ -8,7 +8,7 @@
 
 ## Video
 
-Link: [text](https://youtu.be/9-EUVbKnS4U)
+Link: [Video de sustentación](https://youtu.be/9-EUVbKnS4U)
 
 ## Sistema de Entrenamiento, Despliegue y Monitoreo de Modelos de Predicción de Precios de Vivienda
 

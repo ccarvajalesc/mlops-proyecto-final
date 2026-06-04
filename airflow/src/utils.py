@@ -1794,7 +1794,7 @@ def train_evaluate_register_candidate():
 
         model_info = mlflow.catboost.log_model(
             model,
-            name="model"
+            artifact_path="model"
         )
 
         run_id = run.info.run_id

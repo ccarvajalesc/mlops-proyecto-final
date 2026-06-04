@@ -1,6 +1,10 @@
 FROM apache/airflow:2.9.1-python3.11
 
 USER airflow
+
+ARG GIT_COMMIT
+ENV GIT_COMMIT=$GIT_COMMIT
+
 # Actualizar pip para evitar warnings
 RUN pip install --upgrade pip
 

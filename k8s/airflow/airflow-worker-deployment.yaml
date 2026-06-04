@@ -29,7 +29,7 @@ spec:
               memory: "3Gi"
               cpu: "3000m"
 
-          image: karabaharesu/mlops-final-airflow:34
+          image: karabaharesu/mlops-final-airflow:35
           imagePullPolicy: Always
 
           command:

@@ -22,7 +22,7 @@ spec:
       containers:
         - name: streamlit-ui
 
-          image: karabaharesu/mlops-final-streamlit-ui:30
+          image: karabaharesu/mlops-final-streamlit-ui:31
           imagePullPolicy: Always
 
           envFrom:

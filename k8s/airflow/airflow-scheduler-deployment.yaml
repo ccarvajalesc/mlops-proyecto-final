@@ -21,7 +21,7 @@ spec:
       containers:
         - name: airflow-scheduler
 
-          image: karabaharesu/mlops-final-airflow:30
+          image: karabaharesu/mlops-final-airflow:31
           imagePullPolicy: Always
 
           resources:

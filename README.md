@@ -1,5 +1,15 @@
 # Proyecto Final MLOps
 
+# Integrantes
+
+* Mateo Ruiz Mendoza
+
+* Carlos Manuel Carvajales
+
+## Video
+
+Link: [text](https://youtu.be/9-EUVbKnS4U)
+
 ## Sistema de Entrenamiento, Despliegue y Monitoreo de Modelos de Predicción de Precios de Vivienda
 
 ## Descripción General
@@ -461,26 +471,306 @@ Esto implementa una estrategia GitOps completa.
 
 ---
 
-# Integrantes
 
-## Mateo Ruiz Mendoza
 
-* Experimentación con Redes Neuronales.
-* Experimentación con Reinforcement Learning.
-* Desarrollo de infraestructura MLOps.
-* Despliegue Kubernetes.
-* Observabilidad.
+# Decisiones de Diseño
 
-## Carlos Manuel Carvajales
+La arquitectura fue diseñada siguiendo principios de desacoplamiento, trazabilidad y automatización del ciclo de vida de modelos.
 
-* Experimentación con CatBoost.
-* Experimentación con Random Forest.
-* Desarrollo del pipeline de entrenamiento.
-* Integración de modelos.
+Las principales decisiones de diseño fueron:
 
-## Video
+### Orquestación mediante Airflow
 
-Desarrollado conjuntamente por ambos integrantes.
+Se seleccionó Apache Airflow como motor de orquestación debido a su capacidad para:
+
+* Modelar pipelines complejos mediante DAGs.
+* Programar ejecuciones periódicas.
+* Implementar lógica condicional mediante Branch Operators.
+* Integrarse fácilmente con MLflow y servicios externos.
+
+### MLflow como Registro Centralizado
+
+MLflow fue utilizado para centralizar:
+
+* Experimentos.
+* Versiones de modelos.
+* Métricas.
+* Artefactos.
+* Registro Champion/Challenger.
+
+Esto permite mantener trazabilidad completa entre:
+
+* Datos utilizados.
+* Código ejecutado.
+* Modelo generado.
+* Métricas obtenidas.
+
+### Separación entre Entrenamiento e Inferencia
+
+La API de inferencia fue desacoplada completamente del pipeline de entrenamiento.
+
+Esto permite:
+
+* Actualizar modelos sin reiniciar la infraestructura.
+* Escalar inferencia independientemente.
+* Aplicar estrategias Champion/Challenger.
+
+La API consulta periódicamente MLflow para identificar si existe una nueva versión Champion y recargarla automáticamente.
+
+### Persistencia de Artefactos
+
+Todos los artefactos de entrenamiento son almacenados en MinIO mediante la integración nativa de MLflow.
+
+Esto incluye:
+
+* Modelos serializados.
+* Metadata de entrenamiento.
+* Métricas.
+* Reportes.
+* Gráficos.
+
+### Observabilidad desde el Diseño
+
+La observabilidad fue considerada como un componente central de la arquitectura.
+
+Se instrumentaron métricas para:
+
+* Infraestructura.
+* API de inferencia.
+* Modelo desplegado.
+* Pruebas de carga.
+
+Las métricas son recolectadas por Prometheus y visualizadas mediante Grafana.
+
+---
+
+# Criterios de Entrenamiento
+
+El sistema implementa una estrategia de reentrenamiento automático basada en detección de drift sobre los datos.
+
+La decisión de entrenamiento se realiza mediante la tarea:
+
+```text
+decide_training
+```
+
+del DAG principal.
+
+## Primer Entrenamiento
+
+Si no existe un modelo Champion registrado en MLflow:
+
+```text
+Champion = None
+```
+
+el sistema fuerza automáticamente el entrenamiento de un nuevo modelo.
+
+## Drift Numérico
+
+Para las variables numéricas:
+
+```text
+price
+bed
+bath
+acre_lot
+house_size
+```
+
+se comparan:
+
+* Media histórica.
+* Desviación estándar histórica.
+
+contra las estadísticas del lote actual.
+
+Se calcula:
+
+```text
+Mean Drift
+Std Drift
+```
+
+y se considera drift cuando la diferencia relativa supera:
+
+```text
+25%
+```
+
+Configuración actual:
+
+```text
+DRIFT_THRESHOLD = 0.25
+MIN_NUMERIC_DRIFTS = 2
+```
+
+Por lo tanto, el entrenamiento se activa cuando al menos dos mediciones de drift superan el umbral configurado.
+
+## Drift Categórico
+
+Para las variables:
+
+```text
+status
+city
+state
+zip_code
+```
+
+se detectan categorías no observadas durante el entrenamiento del Champion.
+
+Si aparecen nuevas categorías:
+
+```text
+unseen categories
+```
+
+el sistema considera que existe drift categórico y activa el entrenamiento.
+
+## Razón de Entrenamiento
+
+Cuando se decide entrenar, el sistema genera automáticamente una descripción detallada de la decisión.
+
+Ejemplo:
+
+```text
+Current batch=15
+
+Reference batches=[1,2,3]
+
+price: mean drift 34.2%
+
+house_size: std drift 29.5%
+```
+
+Esta información es almacenada en MLflow como artefacto del experimento para mantener trazabilidad de la decisión tomada.
+
+---
+
+# Registro de Información de Entrenamiento
+
+Cada ejecución de entrenamiento registra en MLflow:
+
+### Información del Dataset
+
+* Batch utilizado.
+* Conjunto de batches históricos.
+* Cantidad de observaciones.
+* Variables utilizadas.
+
+### Información del Código
+
+* Commit Git asociado al entrenamiento.
+* Fecha y hora de ejecución.
+
+### Parámetros del Modelo
+
+Incluyendo:
+
+```text
+iterations
+learning_rate
+depth
+loss_function
+random_seed
+```
+
+y demás hiperparámetros relevantes.
+
+### Métricas
+
+Entrenamiento:
+
+* RMSE
+* MAE
+* R²
+
+Validación:
+
+* RMSE
+* MAE
+* R²
+
+Prueba:
+
+* RMSE
+* MAE
+* R²
+
+### Artefactos
+
+Entre los artefactos almacenados se incluyen:
+
+* Modelo serializado.
+* Metadata de entrenamiento.
+* Razón de entrenamiento.
+* Reportes de evaluación.
+* Gráficos de desempeño.
+
+---
+
+# Reglas de Promoción Champion / Challenger
+
+El proyecto implementa una estrategia automática Champion/Challenger utilizando MLflow Model Registry.
+
+## Champion
+
+Corresponde al modelo actualmente desplegado en producción.
+
+Se encuentra registrado con el alias:
+
+```text
+champion
+```
+
+La API de inferencia utiliza exclusivamente este modelo para responder predicciones.
+
+## Challenger
+
+Corresponde al modelo recién entrenado.
+
+Antes de ser promovido, es comparado contra el Champion actual.
+
+## Comparación
+
+El sistema evalúa las métricas registradas para ambos modelos.
+
+Actualmente la comparación se realiza principalmente utilizando:
+
+```text
+RMSE
+```
+
+donde un valor menor indica mejor desempeño.
+
+## Regla de Promoción
+
+El Challenger es promovido automáticamente cuando:
+
+```text
+RMSE Challenger < RMSE Champion
+```
+
+En ese caso:
+
+1. Se actualiza el alias Champion en MLflow.
+2. El Challenger se convierte en la nueva versión productiva.
+3. La API detecta automáticamente el cambio.
+4. El modelo es recargado sin intervención manual.
+
+## Rechazo de Promoción
+
+Si el Challenger no supera al Champion:
+
+```text
+RMSE Challenger >= RMSE Champion
+```
+
+el modelo permanece registrado en MLflow para trazabilidad, pero no es desplegado.
+
+De esta forma se evita degradar el rendimiento del sistema en producción.
+
 
 ---
 

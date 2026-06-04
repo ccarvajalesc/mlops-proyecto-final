@@ -1479,8 +1479,50 @@ def build_training_metadata(df):
     return metadata
 
 
+def get_training_reason():
+
+    decision = decide_training()
+
+    return decision.get(
+        "reasons",
+        ["No reason available"]
+    )
+
+import subprocess
+
+
+def get_git_commit():
+
+    try:
+
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"]
+            )
+            .decode()
+            .strip()
+        )
+
+    except Exception:
+
+        return "unknown"
+
 def train_evaluate_register_candidate():
 
+    NUMERIC_FEATURES = [
+        "price",
+        "bed",
+        "bath",
+        "acre_lot",
+        "house_size"
+    ]
+ 
+    CATEGORICAL_FEATURES = [
+        "status",
+        "city",
+        "state",
+        "zip_code"
+    ]
     df = load_training_dataset()
 
     train_df = df[
@@ -1492,29 +1534,82 @@ def train_evaluate_register_candidate():
     ].copy()
 
     X_train = train_df[FEATURES]
-
     y_train = train_df[TARGET]
 
     X_test = test_df[FEATURES]
-
     y_test = test_df[TARGET]
+
+    # ==================================================
+    # TRAINING CONTEXT
+    # ==================================================
+
+    batch_numbers = sorted(
+        df["batch_number"]
+        .unique()
+        .tolist()
+    )
+
+    training_reason = (
+        get_training_reason()
+    )
+
+    # ==================================================
+    # GIT COMMIT
+    # ==================================================
+
+    try:
+
+        repo_path = os.getcwd()
+
+        subprocess.run(
+            [
+                "git",
+                "config",
+                "--global",
+                "--add",
+                "safe.directory",
+                repo_path
+            ],
+            check=False,
+            capture_output=True
+        )
+
+        git_commit = (
+            subprocess.check_output(
+                [
+                    "git",
+                    "rev-parse",
+                    "HEAD"
+                ],
+                cwd=repo_path
+            )
+            .decode()
+            .strip()
+        )
+
+    except Exception:
+
+        git_commit = "unknown"
+
+    # ==================================================
+    # MODEL
+    # ==================================================
 
     model = CatBoostRegressor(
 
         iterations=500,
-
         learning_rate=0.05,
-
         depth=6,
-
         loss_function="RMSE",
-
         verbose=False,
-
         random_seed=42
     )
 
     with mlflow.start_run() as run:
+
+        # ==============================================
+        # TRAIN
+        # ==============================================
 
         model.fit(
             X_train,
@@ -1525,6 +1620,10 @@ def train_evaluate_register_candidate():
         predictions = model.predict(
             X_test
         )
+
+        # ==============================================
+        # METRICS
+        # ==============================================
 
         rmse = np.sqrt(
             mean_squared_error(
@@ -1558,11 +1657,92 @@ def train_evaluate_register_candidate():
             r2
         )
 
+        # ==============================================
+        # PARAMS
+        # ==============================================
+
+        mlflow.log_params({
+
+            "iterations": 500,
+            "learning_rate": 0.05,
+            "depth": 6,
+            "loss_function": "RMSE",
+
+            "categorical_features":
+                ",".join(
+                    CATEGORICAL_FEATURES
+                ),
+
+            "numeric_features":
+                ",".join(
+                    FEATURES
+                )
+        })
+
+        # ==============================================
+        # TAGS
+        # ==============================================
+
+        mlflow.set_tags({
+
+            "git_commit":
+                git_commit,
+
+            "training_reason":
+                " | ".join(
+                    training_reason
+                ),
+
+            "batch_numbers":
+                ",".join(
+                    map(
+                        str,
+                        batch_numbers
+                    )
+                )
+        })
+
+        # ==============================================
+        # EXISTING METADATA
+        # ==============================================
+
         metadata = build_training_metadata(
             df
         )
 
+        # ==============================================
+        # TRAINING CONTEXT
+        # ==============================================
+
+        training_context = {
+
+            "git_commit":
+                git_commit,
+
+            "batch_numbers":
+                batch_numbers,
+
+            "training_reason":
+                training_reason,
+
+            "training_metrics": {
+
+                "rmse":
+                    float(rmse),
+
+                "mae":
+                    float(mae),
+
+                "r2":
+                    float(r2)
+            }
+        }
+
         with tempfile.TemporaryDirectory() as tmpdir:
+
+            # ------------------------------------------
+            # metadata existente
+            # ------------------------------------------
 
             metadata_path = os.path.join(
                 tmpdir,
@@ -1584,25 +1764,57 @@ def train_evaluate_register_candidate():
                 metadata_path
             )
 
+            # ------------------------------------------
+            # nuevo contexto
+            # ------------------------------------------
+
+            context_path = os.path.join(
+                tmpdir,
+                "training_context.json"
+            )
+
+            with open(
+                context_path,
+                "w"
+            ) as f:
+
+                json.dump(
+                    training_context,
+                    f,
+                    indent=4
+                )
+
+            mlflow.log_artifact(
+                context_path
+            )
+
+        # ==============================================
+        # MODEL
+        # ==============================================
+
         model_info = mlflow.catboost.log_model(
             model,
-            artifact_path="model"
+            name="model"
         )
 
         run_id = run.info.run_id
 
     return {
 
-        "run_id": run_id,
+        "run_id":
+            run_id,
 
         "model_uri":
             model_info.model_uri,
 
-        "rmse": rmse,
+        "rmse":
+            rmse,
 
-        "mae": mae,
+        "mae":
+            mae,
 
-        "r2": r2
+        "r2":
+            r2
     }
 
 

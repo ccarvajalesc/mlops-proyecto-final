@@ -19,5 +19,8 @@ COPY airflow/src /opt/airflow/src
 # Copiar plugins
 COPY airflow/plugins /opt/airflow/plugins
 
+# Agregar carpeta .git
+COPY .git /opt/airflow/.git
+
 # Asegurar imports desde /opt/airflow
 ENV PYTHONPATH=/opt/airflow

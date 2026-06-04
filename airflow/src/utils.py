@@ -46,7 +46,7 @@ MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD", "mlops_pass")
 MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
 #MLFLOW_EXPERIMENT = os.environ.get("MLFLOW_EXPERIMENT", "diabetes_readmission_experiment")
 MLFLOW_EXPERIMENT = (
-    "real_estate_price_prediction"
+    "real_estate_price_prediction_v2"
 )
 MODEL_NAME = "real_estate_price_model"
 
